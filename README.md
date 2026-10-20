@@ -1,2 +1,94 @@
-# cloudtec
-Building for the future 
+# CloudTec Center
+
+One web console for your **Active Directory** domains and **VMware vSphere** (vCenter) servers.
+
+- **Dashboard**: users, lockouts, computers, VMs, hosts and storage across every connection at a glance.
+- **Active Directory**: browse and search users, groups and computers. Unlock accounts, enable or disable them, and reset passwords.
+- **vSphere**: browse VMs, hosts, datastores and clusters. Power on, shut down or restart the guest, power off, and view VM details (guest OS, IP, disks, NICs).
+- **Cross-check**: lines up AD computer accounts with VMs by hostname, so you can see VMs that never joined the domain and computer accounts with no VM behind them.
+- **Global search**: one search box across every domain and vCenter, with actions available straight from the results.
+- **Demo mode**: add sample connections and try everything without a lab.
+
+You can add as many domains and vCenters as you like.
+
+## Quick start
+
+```bash
+pip install -r requirements.txt
+CLOUDTEC_ADMIN_PASSWORD='choose-a-strong-one' uvicorn app.main:create_app --factory --port 8000
+```
+
+Open http://localhost:8000 and sign in, then go to **Connections**. Tick **Demo mode** to try it with sample data, or enter real details:
+
+| Active Directory | |
+|---|---|
+| Domain controller | `dc01.corp.example.com` |
+| Port | `636` (LDAPS) or `389` |
+| Base DN | `DC=corp,DC=example,DC=com` |
+| Bind account | a UPN (`svc-cloudtec@corp.example.com`) or full DN |
+
+| vCenter | |
+|---|---|
+| vCenter host | `vcenter.corp.example.com` |
+| Username | `administrator@vsphere.local` or a delegated account |
+
+Use **Test connection** before saving. Untick **Verify certificate** only if your DC or vCenter uses a self-signed certificate you can't add to the trust store.
+
+### Docker
+
+```bash
+CLOUDTEC_ADMIN_PASSWORD='choose-a-strong-one' docker compose up -d --build
+```
+
+Data (connections, encryption key) lives in the `cloudtec-data` volume.
+
+## Configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CLOUDTEC_ADMIN_PASSWORD` | generated | Console sign-in password. If unset, one is generated on first start and saved to `<data dir>/admin_password`. |
+| `CLOUDTEC_DATA_DIR` | `./data` | Where the SQLite database and encryption key are stored. |
+| `CLOUDTEC_SECRET_KEY` | generated | Fernet key used to encrypt saved passwords. If unset, one is generated into `<data dir>/secret.key`. **Back this up**: without it, saved passwords can't be decrypted. |
+| `CLOUDTEC_SECURE_COOKIES` | `false` | Set to `true` when serving over HTTPS. |
+| `CLOUDTEC_SESSION_HOURS` | `8` | How long a sign-in lasts. |
+
+## Requirements on the other side
+
+**Active Directory**
+- Use a dedicated service account with only the rights you need, delegated on the relevant OUs: *Read* for browsing; *Write userAccountControl* for enable/disable; *Write lockoutTime* for unlock; *Reset password* for resets.
+- Password resets only work over **LDAPS** (port 636). That's an Active Directory rule.
+- Simple bind is used, so use LDAPS for anything beyond a lab.
+
+**vCenter**
+- vCenter 7.0 U2 or later (uses the `/api` REST endpoints).
+- *Shut down* and *Restart* go through VMware Tools. *Power off* is a hard power-off.
+- A read-only role is enough for browsing. Power actions need *Virtual machine > Interaction > Power on/off/Reset* and *Guest operations*.
+
+## Security notes
+
+- The console holds privileged credentials, so treat it like a jump host. Keep it on a management network, put it behind HTTPS (for example a reverse proxy), and set `CLOUDTEC_SECURE_COOKIES=true`.
+- Saved passwords are encrypted at rest and never returned by the API.
+- AD changes are limited to objects inside each connection's base DN.
+- There is a single admin account. Per-user sign-in (for example via AD/LDAP or SSO) and an audit log are natural next steps.
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests cover the API in demo mode, the vSphere connector against a mocked vCenter REST API, and the AD connector against ldap3's in-memory LDAP server. Interactive API docs are at `/api/docs`.
+
+```
+app/
+  main.py              API routes
+  auth.py              console sign-in
+  store.py             encrypted connection storage (SQLite)
+  connectors/
+    ad.py              Active Directory (ldap3)
+    vsphere.py         vCenter REST API (httpx)
+    demo.py            sample-data stand-ins for both
+  static/              web UI (plain HTML/CSS/JS, no build step)
+tests/
+```

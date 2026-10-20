@@ -1,0 +1,16 @@
+services:
+  cloudtec:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Leave unset to have one generated into the data volume on first start.
+      CLOUDTEC_ADMIN_PASSWORD: ${CLOUDTEC_ADMIN_PASSWORD:-}
+      # Set to true once the console is served over HTTPS.
+      CLOUDTEC_SECURE_COOKIES: ${CLOUDTEC_SECURE_COOKIES:-false}
+    volumes:
+      - cloudtec-data:/data
+    restart: unless-stopped
+
+volumes:
+  cloudtec-data:
