@@ -135,3 +135,53 @@ def test_delete_connection(client):
 def test_ui_served(client):
     assert "CloudTec Center" in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
+
+
+def file_settings(tmp_path):
+    return Settings(data_dir=tmp_path, secret_key=None, admin_password=None,
+                    secure_cookies=False, session_hours=1)
+
+
+def test_change_password(tmp_path):
+    settings = file_settings(tmp_path)
+    app = create_app(settings)
+    old = (tmp_path / "admin_password").read_text().strip()
+    with TestClient(app) as me, TestClient(app) as other:
+        assert me.post("/api/login", json={"password": old}).status_code == 200
+        assert other.post("/api/login", json={"password": old}).status_code == 200
+        assert me.get("/api/settings").json() == {"password_from_env": False}
+
+        r = me.post("/api/settings/password", json={"current_password": "wrong", "new_password": "new-password-1"})
+        assert r.status_code == 400
+        r = me.post("/api/settings/password", json={"current_password": old, "new_password": "short"})
+        assert r.status_code == 422
+        r = me.post("/api/settings/password", json={"current_password": old, "new_password": "new-password-1"})
+        assert r.status_code == 200
+
+        assert me.get("/api/connections").status_code == 200      # this session survives
+        assert other.get("/api/connections").status_code == 401   # others are signed out
+
+    # stored hashed, plain-text file gone, and it survives a restart
+    assert not (tmp_path / "admin_password").exists()
+    assert "new-password-1" not in (tmp_path / "admin_password.hash").read_text()
+    with TestClient(create_app(settings)) as c:
+        assert c.post("/api/login", json={"password": old}).status_code == 401
+        assert c.post("/api/login", json={"password": "new-password-1"}).status_code == 200
+
+
+def test_hand_edited_password_file(tmp_path):
+    (tmp_path / "admin_password").write_text("MyNewPassword123\r\n")
+    with TestClient(create_app(file_settings(tmp_path))) as c:
+        assert c.post("/api/login", json={"password": "MyNewPassword123"}).status_code == 200
+
+
+def test_env_password_cannot_be_changed_in_ui(client):
+    assert client.get("/api/settings").json() == {"password_from_env": True}
+    r = client.post("/api/settings/password", json={"current_password": PASSWORD, "new_password": "new-password-1"})
+    assert r.status_code == 409 and "CLOUDTEC_ADMIN_PASSWORD" in r.json()["detail"]
+
+
+def test_settings_requires_login(tmp_path):
+    with TestClient(create_app(file_settings(tmp_path))) as c:
+        r = c.post("/api/settings/password", json={"current_password": "x", "new_password": "new-password-1"})
+        assert r.status_code == 401

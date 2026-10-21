@@ -46,11 +46,17 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CLOUDTEC_ADMIN_PASSWORD` | generated | Console sign-in password. If unset, one is generated on first start and saved to `<data dir>/admin_password`. |
+| `CLOUDTEC_ADMIN_PASSWORD` | unset | Fixes the console sign-in password. While set, the password can't be changed from the Settings page. |
 | `CLOUDTEC_DATA_DIR` | `./data` | Where the SQLite database and encryption key are stored. |
 | `CLOUDTEC_SECRET_KEY` | generated | Fernet key used to encrypt saved passwords. If unset, one is generated into `<data dir>/secret.key`. **Back this up**: without it, saved passwords can't be decrypted. |
 | `CLOUDTEC_SECURE_COOKIES` | `false` | Set to `true` when serving over HTTPS. |
 | `CLOUDTEC_SESSION_HOURS` | `8` | How long a sign-in lasts. |
+
+## Admin password
+
+- **Change it** under **Settings** after you sign in. The new password is stored as a salted hash in `<data dir>/admin_password.hash`, and any other signed-in browsers are signed out.
+- **First start:** if `CLOUDTEC_ADMIN_PASSWORD` isn't set and no password has been saved yet, one is generated and written in plain text to `<data dir>/admin_password` so you can read it. It's replaced by the hash file the first time you change the password.
+- **Forgot it?** Stop CloudTec, delete `<data dir>/admin_password.hash`, put the password you want in `<data dir>/admin_password`, and start it again. Then change it under Settings so it's stored hashed.
 
 ## Requirements on the other side
 

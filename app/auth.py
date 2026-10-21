@@ -1,13 +1,20 @@
 """Single-admin login for the console itself.
 
 The console holds directory and vCenter credentials, so every API call other
-than login requires a session cookie. The admin password comes from
-CLOUDTEC_ADMIN_PASSWORD, or is generated on first start and written to
-<data_dir>/admin_password (mode 0600).
+than login requires a session cookie. Where the admin password comes from, in
+order of precedence:
+
+1. CLOUDTEC_ADMIN_PASSWORD. It can't be changed from the UI while set.
+2. <data_dir>/admin_password.hash, written when the password is changed in the UI.
+3. <data_dir>/admin_password, a plain-text file. It is generated on first start
+   (mode 0600) and can also be edited by hand. Changing the password in the UI
+   replaces it with the hash file.
 """
 
+import hashlib
 import hmac
 import logging
+import os
 import secrets
 import threading
 import time
@@ -18,27 +25,75 @@ from .store import _write_private
 log = logging.getLogger("cloudtec")
 
 COOKIE = "cloudtec_session"
+PLAIN_FILE = "admin_password"
+HASH_FILE = "admin_password.hash"
+SCRYPT = {"n": 2**14, "r": 8, "p": 1, "dklen": 32}
 
 
-def load_or_create_password(data_dir: Path, configured: str | None) -> str:
-    if configured:
-        return configured
-    path = data_dir / "admin_password"
-    if not path.exists():
-        _write_private(path, secrets.token_urlsafe(12))
-        log.warning("Generated admin password, stored in %s", path)
-    return path.read_text().strip()
+class PasswordError(Exception):
+    pass
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.scrypt(password.encode(), salt=salt, **SCRYPT)
+    return f"scrypt${salt.hex()}${digest.hex()}"
+
+
+def verify_hash(password: str, stored: str) -> bool:
+    try:
+        scheme, salt, digest = stored.strip().split("$")
+        if scheme != "scrypt":
+            return False
+        attempt = hashlib.scrypt(password.encode(), salt=bytes.fromhex(salt), **SCRYPT)
+    except ValueError:
+        return False
+    return hmac.compare_digest(attempt, bytes.fromhex(digest))
+
+
+class AdminPassword:
+    def __init__(self, data_dir: Path, configured: str | None):
+        self._plain_path = data_dir / PLAIN_FILE
+        self._hash_path = data_dir / HASH_FILE
+        self._configured = configured
+        self._lock = threading.Lock()
+        if not configured and not self._hash_path.exists() and not self._plain_path.exists():
+            _write_private(self._plain_path, secrets.token_urlsafe(12))
+            log.warning("Generated admin password, stored in %s", self._plain_path)
+
+    @property
+    def from_env(self) -> bool:
+        return self._configured is not None
+
+    def check(self, attempt: str) -> bool:
+        if self._configured is not None:
+            return hmac.compare_digest(attempt.encode(), self._configured.encode())
+        with self._lock:
+            if self._hash_path.exists():
+                return verify_hash(attempt, self._hash_path.read_text())
+            stored = self._plain_path.read_text().strip()
+        return hmac.compare_digest(attempt.encode(), stored.encode())
+
+    def change(self, current: str, new: str) -> None:
+        if self.from_env:
+            raise PasswordError(
+                "The password is set by CLOUDTEC_ADMIN_PASSWORD. Remove that setting to change it here."
+            )
+        if not self.check(current):
+            raise PasswordError("Current password is incorrect")
+        with self._lock:
+            tmp = self._hash_path.with_suffix(".tmp")
+            tmp.unlink(missing_ok=True)
+            _write_private(tmp, hash_password(new))
+            os.replace(tmp, self._hash_path)
+            self._plain_path.unlink(missing_ok=True)
 
 
 class Sessions:
-    def __init__(self, password: str, ttl_seconds: int):
-        self._password = password.encode()
+    def __init__(self, ttl_seconds: int):
         self._ttl = ttl_seconds
         self._tokens: dict[str, float] = {}
         self._lock = threading.Lock()
-
-    def check_password(self, attempt: str) -> bool:
-        return hmac.compare_digest(attempt.encode(), self._password)
 
     def create(self) -> str:
         token = secrets.token_urlsafe(32)
@@ -62,3 +117,7 @@ class Sessions:
         if token:
             with self._lock:
                 self._tokens.pop(token, None)
+
+    def revoke_others(self, keep: str | None) -> None:
+        with self._lock:
+            self._tokens = {t: e for t, e in self._tokens.items() if t == keep}

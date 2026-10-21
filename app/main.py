@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .auth import COOKIE, Sessions, load_or_create_password
+from .auth import COOKIE, AdminPassword, PasswordError, Sessions
 from .config import Settings
 from .connectors import ConnectorError, open_connector
 from .store import Connection, Store, load_or_create_key
@@ -27,6 +27,11 @@ CONFIG_FIELDS = {
 
 class LoginBody(BaseModel):
     password: str
+
+
+class ChangePasswordBody(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=256)
 
 
 class ConnectionBody(BaseModel):
@@ -61,8 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     store = Store(settings.data_dir, load_or_create_key(settings.data_dir, settings.secret_key))
-    sessions = Sessions(load_or_create_password(settings.data_dir, settings.admin_password),
-                        settings.session_hours * 3600)
+    admin = AdminPassword(settings.data_dir, settings.admin_password)
+    sessions = Sessions(settings.session_hours * 3600)
 
     app = FastAPI(title="CloudTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json")
 
@@ -101,7 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/login")
     def login(body: LoginBody, response: Response):
-        if not sessions.check_password(body.password):
+        if not admin.check(body.password):
             raise HTTPException(401, "Wrong password")
         response.set_cookie(COOKIE, sessions.create(), httponly=True, samesite="strict",
                             secure=settings.secure_cookies, max_age=settings.session_hours * 3600)
@@ -118,6 +123,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"signed_in": sessions.valid(request.cookies.get(COOKIE))}
 
     api = [Depends(require_session)]
+
+    # --- settings ----------------------------------------------------------
+
+    @app.get("/api/settings", dependencies=api)
+    def get_settings():
+        return {"password_from_env": admin.from_env}
+
+    @app.post("/api/settings/password", dependencies=api)
+    def change_password(body: ChangePasswordBody, request: Request):
+        try:
+            admin.change(body.current_password, body.new_password)
+        except PasswordError as e:
+            raise HTTPException(409 if admin.from_env else 400, str(e)) from e
+        sessions.revoke_others(request.cookies.get(COOKIE))
+        return {"ok": True}
 
     # --- connections -------------------------------------------------------
 

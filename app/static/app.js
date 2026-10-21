@@ -604,6 +604,43 @@ async function renderConnections() {
   }
 }
 
+// ---- settings ------------------------------------------------------------
+
+async function renderSettings() {
+  loading();
+  const s = await api("GET", "/api/settings");
+  const body = s.password_from_env
+    ? `<div class="notice">The admin password is set by the <code>CLOUDTEC_ADMIN_PASSWORD</code> environment variable,
+        so it can't be changed here. Remove that variable and restart CloudTec, then sign in with the
+        same password and change it on this page.</div>`
+    : `<form id="pw-change" class="form" style="max-width:640px">
+        <label class="full">Current password <input type="password" name="current" required autocomplete="current-password"></label>
+        <label>New password <input type="password" name="next" minlength="8" required autocomplete="new-password"></label>
+        <label>Confirm new password <input type="password" name="confirm" minlength="8" required autocomplete="new-password"></label>
+        <p class="full muted" style="margin:0">At least 8 characters. Other signed-in browsers will be signed out.</p>
+        <div class="full" id="pw-msg"></div>
+        <div class="full"><button class="btn primary" type="submit">Change password</button></div>
+      </form>`;
+  view.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
+    <div class="card"><h2>Admin password</h2>${body}</div>`;
+
+  const form = $("#pw-change");
+  if (!form) return;
+  const msg = (text, ok) => { $("#pw-msg").innerHTML = `<div class="notice ${ok ? "ok" : "bad"}">${esc(text)}</div>`; };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (form.next.value !== form.confirm.value) { msg("The new passwords don't match", false); return; }
+    const btn = form.querySelector("button[type=submit]");
+    btn.disabled = true;
+    try {
+      await api("POST", "/api/settings/password", { current_password: form.current.value, new_password: form.next.value });
+      form.reset();
+      msg("Password changed. Use the new password next time you sign in.", true);
+    } catch (err) { msg(err.message, false); }
+    btn.disabled = false;
+  };
+}
+
 // ---- router --------------------------------------------------------------
 
 const routes = {
@@ -612,6 +649,7 @@ const routes = {
   vsphere: renderVSphere,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
+  settings: renderSettings,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };
 
