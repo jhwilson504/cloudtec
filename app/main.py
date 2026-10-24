@@ -376,6 +376,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- UI ----------------------------------------------------------------
 
+    @app.middleware("http")
+    async def revalidate_ui(request: Request, call_next):
+        # Make browsers check for a newer page and scripts every time, so an update shows up at once.
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     @app.get("/", include_in_schema=False)

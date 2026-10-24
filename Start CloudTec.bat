@@ -5,13 +5,11 @@ setlocal
 title CloudTec Center
 cd /d "%~dp0"
 
-rem Already running? Just open the browser.
+rem Already running? Stop it, so this always starts the version in this folder.
 powershell -NoProfile -Command "try { Invoke-WebRequest http://127.0.0.1:8000/api/me -UseBasicParsing -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
 if not errorlevel 1 (
-  echo CloudTec is already running. Opening it in your browser...
-  start "" http://localhost:8000
-  timeout /t 3 >nul
-  exit /b 0
+  echo CloudTec is already running. Restarting it so you get the latest version...
+  powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }; Start-Sleep 2"
 )
 
 rem Find Python: the "py" launcher first, then "python".

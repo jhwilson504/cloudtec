@@ -200,3 +200,9 @@ def test_password_file_blanked_while_running_never_allows_empty_login(tmp_path):
     with TestClient(create_app(file_settings(tmp_path))) as c:
         (tmp_path / "admin_password").write_text("")
         assert c.post("/api/login", json={"password": ""}).status_code == 401
+
+
+def test_ui_is_revalidated_so_updates_show(client):
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    assert client.get("/static/app.js").headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/api/connections").headers
