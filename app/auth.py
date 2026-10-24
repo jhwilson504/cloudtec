@@ -57,9 +57,18 @@ class AdminPassword:
         self._hash_path = data_dir / HASH_FILE
         self._configured = configured
         self._lock = threading.Lock()
-        if not configured and not self._hash_path.exists() and not self._plain_path.exists():
-            _write_private(self._plain_path, secrets.token_urlsafe(12))
-            log.warning("Generated admin password, stored in %s", self._plain_path)
+        if not configured and not self._hash_path.exists() and not self._read_plain():
+            # No usable password yet (missing or blank file): generate one and show it.
+            password = secrets.token_urlsafe(12)
+            self._plain_path.unlink(missing_ok=True)
+            _write_private(self._plain_path, password)
+            log.warning("Admin password: %s (saved in %s)", password, self._plain_path)
+
+    def _read_plain(self) -> str:
+        try:
+            return self._plain_path.read_text().strip()
+        except FileNotFoundError:
+            return ""
 
     @property
     def from_env(self) -> bool:
@@ -71,8 +80,9 @@ class AdminPassword:
         with self._lock:
             if self._hash_path.exists():
                 return verify_hash(attempt, self._hash_path.read_text())
-            stored = self._plain_path.read_text().strip()
-        return hmac.compare_digest(attempt.encode(), stored.encode())
+            stored = self._read_plain()
+        # A blank file must never mean "any empty password signs in".
+        return bool(stored) and hmac.compare_digest(attempt.encode(), stored.encode())
 
     def change(self, current: str, new: str) -> None:
         if self.from_env:

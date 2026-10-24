@@ -185,3 +185,18 @@ def test_settings_requires_login(tmp_path):
     with TestClient(create_app(file_settings(tmp_path))) as c:
         r = c.post("/api/settings/password", json={"current_password": "x", "new_password": "new-password-1"})
         assert r.status_code == 401
+
+
+def test_blank_password_file_is_regenerated(tmp_path):
+    (tmp_path / "admin_password").write_text("\r\n")
+    with TestClient(create_app(file_settings(tmp_path))) as c:
+        password = (tmp_path / "admin_password").read_text().strip()
+        assert len(password) >= 12
+        assert c.post("/api/login", json={"password": ""}).status_code == 401
+        assert c.post("/api/login", json={"password": password}).status_code == 200
+
+
+def test_password_file_blanked_while_running_never_allows_empty_login(tmp_path):
+    with TestClient(create_app(file_settings(tmp_path))) as c:
+        (tmp_path / "admin_password").write_text("")
+        assert c.post("/api/login", json={"password": ""}).status_code == 401
