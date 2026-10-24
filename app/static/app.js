@@ -13,12 +13,18 @@ function esc(value) {
 }
 
 async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-    credentials: "same-origin",
-  });
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+      credentials: "same-origin",
+    });
+  } catch {
+    // The browser couldn't reach the server at all, usually because its window was closed.
+    throw new Error("Can't reach CloudTec. It may have stopped: start it again with Start CloudTec, then retry.");
+  }
   if (res.status === 401 && path !== "/api/login") {
     showLogin();
     throw new Error("Please sign in again");
