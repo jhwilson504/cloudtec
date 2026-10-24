@@ -13,6 +13,10 @@ You can add as many domains and vCenters as you like.
 
 ## Quick start
 
+**Windows:** double-click **`Start CloudTec.bat`**. It installs what's needed the first time (you need [Python](https://www.python.org/downloads/) with "Add python.exe to PATH" ticked), starts CloudTec and opens it in your browser. Keep its window open while you use CloudTec; closing it stops CloudTec.
+
+**Any platform, from a terminal:**
+
 ```bash
 pip install -r requirements.txt
 CLOUDTEC_ADMIN_PASSWORD='choose-a-strong-one' uvicorn app.main:create_app --factory --port 8000
