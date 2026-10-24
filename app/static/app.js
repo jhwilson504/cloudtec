@@ -129,6 +129,59 @@ function debounce(fn, ms = 300) {
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
+// ---- press-and-hold "eye" on every password box ---------------------------
+
+const EYE_ICON = `<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+  <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+  <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="2"/></svg>`;
+
+function addPeek(input) {
+  if (input.dataset.peek) return;
+  input.dataset.peek = "1";
+  const hadFocus = document.activeElement === input;
+  const wrap = document.createElement("span");
+  wrap.className = "pw-wrap";
+  input.parentNode.insertBefore(wrap, input);
+  wrap.appendChild(input);
+  if (hadFocus) input.focus();
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "pw-peek";
+  btn.innerHTML = EYE_ICON;
+  btn.title = "Press and hold to show the password";
+  btn.setAttribute("aria-label", btn.title);
+  wrap.appendChild(btn);
+
+  let before = null;  // the box's type while peeking, so a "Show password" tick is respected
+  const show = () => {
+    if (before !== null) return;
+    before = input.type;
+    input.type = "text";
+    btn.classList.add("on");
+  };
+  const hide = () => {
+    if (before === null) return;
+    input.type = before;
+    before = null;
+    btn.classList.remove("on");
+  };
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();  // keep the cursor in the password box
+    show();
+    window.addEventListener("pointerup", hide, { once: true });
+    window.addEventListener("pointercancel", hide, { once: true });
+  });
+  btn.addEventListener("keydown", (e) => { if (e.key === " " || e.key === "Enter") { e.preventDefault(); show(); } });
+  btn.addEventListener("keyup", hide);
+  btn.addEventListener("blur", hide);
+  btn.addEventListener("click", (e) => e.preventDefault());
+}
+
+const enhancePasswords = () => document.querySelectorAll("input[type=password]:not([data-peek])").forEach(addPeek);
+new MutationObserver(enhancePasswords).observe(document.body, { childList: true, subtree: true });
+enhancePasswords();
+
 // ---- auth ----------------------------------------------------------------
 
 function showLogin() {
