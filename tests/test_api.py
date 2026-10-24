@@ -149,7 +149,7 @@ def test_change_password(tmp_path):
     with TestClient(app) as me, TestClient(app) as other:
         assert me.post("/api/login", json={"password": old}).status_code == 200
         assert other.post("/api/login", json={"password": old}).status_code == 200
-        assert me.get("/api/settings").json() == {"password_from_env": False}
+        assert me.get("/api/settings").json()["password_from_env"] is False
 
         r = me.post("/api/settings/password", json={"current_password": "wrong", "new_password": "new-password-1"})
         assert r.status_code == 400
@@ -176,7 +176,7 @@ def test_hand_edited_password_file(tmp_path):
 
 
 def test_env_password_cannot_be_changed_in_ui(client):
-    assert client.get("/api/settings").json() == {"password_from_env": True}
+    assert client.get("/api/settings").json()["password_from_env"] is True
     r = client.post("/api/settings/password", json={"current_password": PASSWORD, "new_password": "new-password-1"})
     assert r.status_code == 409 and "CLOUDTEC_ADMIN_PASSWORD" in r.json()["detail"]
 

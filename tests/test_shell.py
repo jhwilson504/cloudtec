@@ -66,7 +66,7 @@ def test_local_mode_refuses_remote_browsers(tmp_path):
     # TestClient's client address is "testclient", i.e. not this computer.
     with make_client(tmp_path, "local") as c:
         s = c.get("/api/shell").json()
-        assert s["available"] is False and "localhost" in s["reason"]
+        assert s["available"] is False and "computer CloudTec runs on" in s["reason"]
         assert c.post("/api/shell/run", json={"command": "Get-Date"}).status_code == 403
 
 

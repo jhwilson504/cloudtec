@@ -1132,8 +1132,22 @@ async function renderSettings() {
         <div class="full" id="pw-msg"></div>
         <div class="full"><button class="btn primary" type="submit">Change password</button></div>
       </form>`;
+  const net = s.network;
+  const cert = net?.certificate;
+  const netCard = !net ? "" : `<div class="card section"><h2>Network access</h2>
+    ${net.enabled && cert
+      ? `<div class="notice ok">Colleagues can use CloudTec over HTTPS at
+           ${cert.names.filter((n) => n !== "localhost" && !n.startsWith("127.")).map((n) => `<b>https://${esc(n)}:${net.port}</b>`).join(", ")}</div>
+         <dl class="kv" style="margin-top:12px">
+           <dt>Certificate</dt><dd>${esc(cert.subject)}</dd>
+           <dt>Issued by</dt><dd>${esc(cert.issuer)}${cert.own_ca ? ' <span class="badge warn">CloudTec\'s own CA</span>' : ""}</dd>
+           <dt>Expires</dt><dd>${esc(new Date(cert.expires).toLocaleDateString())}</dd></dl>
+         ${cert.own_ca ? `<p class="muted small-note">Colleagues' PCs must trust <code>data\\tls\\CloudTec-CA.cer</code> once (Group Policy, or double-click it on each PC).</p>` : ""}`
+      : `<p class="muted" style="margin-top:0">CloudTec is only reachable on this PC. To let colleagues use it from their own PCs over HTTPS,
+           double-click <b>Set up network access</b> in the CloudTec folder.</p>`}
+    <p class="muted small-note">To change this, run <b>Set up network access</b> in the CloudTec folder, then restart CloudTec with <b>Start CloudTec</b>.</p></div>`;
   view.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
-    <div class="card"><h2>Admin password</h2>${body}</div>`;
+    <div class="card"><h2>Your password</h2>${body}</div>${netCard}`;
 
   const form = $("#pw-change");
   if (!form) return;

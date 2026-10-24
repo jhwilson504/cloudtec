@@ -153,3 +153,10 @@ def test_activity_log_records_who_did_what(app, admin, tmp_path):
     raw = (tmp_path / "audit.log").read_text()
     assert "N3w-Passw0rd!" not in raw and "Op3rator-pw" not in raw
     assert all(json.loads(line) for line in raw.splitlines())
+
+
+def test_network_status_only_for_admins(app, admin):
+    add(admin)
+    op, _ = sign_in(app, "jsmith", "Op3rator-pw")
+    assert "network" not in op.get("/api/settings").json()          # operators: just their password
+    assert admin.get("/api/settings").json()["network"] == {"enabled": False, "port": None, "certificate": None}

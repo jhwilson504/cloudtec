@@ -61,6 +61,20 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 | `CLOUDTEC_SHELL` | `local` | The PowerShell page: `local` allows it only in a browser on the same computer (`localhost`), `on` allows it from anywhere, `off` disables it. |
 | `CLOUDTEC_POWERSHELL` | auto | Path to the PowerShell to use. By default `pwsh` (PowerShell 7) if installed, otherwise `powershell` (Windows PowerShell). |
 
+## Letting colleagues use it (HTTPS on your network)
+
+By default CloudTec only answers on the PC it runs on (`http://localhost:8000`). To let colleagues sign in from their own PCs, double-click **`Set up network access.bat`** (it asks for Administrator so it can add the firewall rule) and choose how CloudTec gets its HTTPS certificate:
+
+1. **Company CA (recommended).** CloudTec writes `data\tls\request.csr`. Have your CA sign it, e.g. with AD Certificate Services:
+   `certreq -submit -attrib "CertificateTemplate:WebServer" data\tls\request.csr cloudtec.cer`
+   then run the setup again, choose **2** and point it at the issued certificate. Domain PCs already trust your CA, so there are no browser warnings.
+2. **Import a `.pfx`** (certificate with private key) you already have.
+3. **CloudTec's own CA.** Quick, but each colleague's PC must trust `data\tls\CloudTec-CA.cer` once: deploy it by Group Policy (*Computer Configuration > Policies > Windows Settings > Security Settings > Public Key Policies > Trusted Root Certification Authorities*) or double-click it on each PC and install it to *Local Machine > Trusted Root Certification Authorities*.
+
+The setup opens TCP **8443** in Windows Firewall (Domain and Private networks) and switches CloudTec to HTTPS on the network. Restart it with **Start CloudTec**; colleagues then open `https://<your PC's name>:8443`. In this mode sign-in cookies are marked Secure. The PowerShell page still only works in a browser on the CloudTec PC itself. To go back to "this PC only", run the setup again and choose **5**. You can also script it: `python -m app.tls --help`.
+
+CloudTec only runs while its window is open on that PC, so for a team a small always-on server or VM is a better home for it.
+
 ## Users and roles
 
 Sign in as **admin** with the admin password, then add people under **Users**. Each person signs in with their own username and password.

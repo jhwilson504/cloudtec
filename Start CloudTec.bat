@@ -1,18 +1,25 @@
 @echo off
 rem Double-click to start CloudTec Center and open it in your browser.
 rem Keep the window open while you use it; closing the window stops CloudTec.
+rem After "Set up network access" it serves HTTPS on the network instead of http://localhost:8000.
 setlocal
 title CloudTec Center
 cd /d "%~dp0"
 
-rem Already running? Stop it, so this always starts the version in this folder.
-powershell -NoProfile -Command "try { Invoke-WebRequest http://127.0.0.1:8000/api/me -UseBasicParsing -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
-if not errorlevel 1 (
-  echo CloudTec is already running. Restarting it so you get the latest version...
-  powershell -NoProfile -Command "Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }; Start-Sleep 2"
-)
+rem Already running? Stop it (only if it really is CloudTec), so this always starts the version in this folder.
+powershell -NoProfile -Command "$ports = @(8000); try { $n = Get-Content 'data\network.json' -Raw | ConvertFrom-Json; if ($n.port) { $ports += [int]$n.port } } catch {}; $ids = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($i in $ids) { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $i); if ($p.CommandLine -match 'app\.(run|main)') { Write-Host 'CloudTec is already running. Restarting it so you get the latest version...'; Stop-Process -Id $i -Force; Start-Sleep 2 } }"
 
-rem Find Python: the "py" launcher first, then "python".
+call :find_python || exit /b 1
+
+%PY% -m app.run --open-browser
+
+echo.
+echo CloudTec has stopped.
+pause
+exit /b 0
+
+:find_python
+rem Find Python: the "py" launcher first, then "python". Install CloudTec's components on first run.
 set "PY="
 py --version >nul 2>nul
 if not errorlevel 1 (
@@ -31,8 +38,6 @@ if not defined PY (
   pause
   exit /b 1
 )
-
-rem Install the components on first run.
 %PY% -c "import fastapi, uvicorn, ldap3, httpx, cryptography" >nul 2>nul
 if errorlevel 1 (
   echo Installing CloudTec components. This only happens the first time...
@@ -45,17 +50,4 @@ if errorlevel 1 (
     exit /b 1
   )
 )
-
-echo.
-echo   CloudTec Center is starting at http://localhost:8000
-echo   Your browser will open in a few seconds.
-echo.
-echo   Keep this window open while you use CloudTec.
-echo   Close this window to stop CloudTec.
-echo.
-start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep 4; Start-Process 'http://localhost:8000'"
-%PY% -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
-
-echo.
-echo CloudTec has stopped.
-pause
+exit /b 0

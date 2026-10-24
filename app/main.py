@@ -21,6 +21,7 @@ from .config import Settings
 from .connectors import ConnectorError, open_connector
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
+from .tls import cert_summary, read_network
 
 log = logging.getLogger("cloudtec")
 STATIC = Path(__file__).parent / "static"
@@ -106,6 +107,16 @@ def port_open(host: str, port: int, timeout: float = 1.5) -> bool:
         return False
 
 
+def this_computer_addresses() -> set[str]:
+    """Addresses a browser on this same computer may connect from."""
+    addresses = {"127.0.0.1", "::1", "localhost"}
+    try:
+        addresses.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+    return addresses
+
+
 def _short_name(name: str | None) -> str:
     return (name or "").split(".")[0].strip().lower()
 
@@ -119,6 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     throttle = LoginThrottle()
     audit_path = settings.data_dir / "audit.log"
     audit_lock = threading.Lock()
+    local_addresses = this_computer_addresses()
     exe = find_powershell(settings.powershell)
     shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
 
@@ -248,7 +260,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/settings")
     def get_settings(user: dict = Depends(require_session)):
-        return {"password_from_env": user["builtin"] and admin.from_env}
+        out = {"password_from_env": user["builtin"] and admin.from_env}
+        if user["role"] == "admin":
+            net = read_network(settings.data_dir)
+            out["network"] = {"enabled": bool(net.get("enabled")), "port": net.get("port"),
+                              "certificate": cert_summary(settings.data_dir)}
+        return out
 
     @app.post("/api/settings/password")
     def change_password(body: ChangePasswordBody, request: Request, user: dict = Depends(require_session)):
@@ -438,12 +455,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def shell_status(request: Request) -> dict:
         """Whether the PowerShell page may be used from this browser, and if not, why."""
-        local = request.client is not None and request.client.host in ("127.0.0.1", "::1", "localhost")
+        local = request.client is not None and request.client.host in local_addresses
         if settings.shell == "off":
             reason = "The PowerShell page is turned off (CLOUDTEC_SHELL=off)."
         elif settings.shell != "on" and not local:
-            reason = ("For safety, PowerShell only works when CloudTec is opened on the computer it runs on "
-                      "(http://localhost:8000). Set CLOUDTEC_SHELL=on to allow it from other computers.")
+            reason = ("For safety, PowerShell only works in a browser on the computer CloudTec runs on. "
+                      "Set CLOUDTEC_SHELL=on to allow it from other computers.")
         elif not shell:
             reason = "PowerShell wasn't found on this computer."
         else:
