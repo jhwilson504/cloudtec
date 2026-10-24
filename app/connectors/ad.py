@@ -35,6 +35,10 @@ USER_ATTRS = [
     "lastLogonTimestamp", "whenCreated", "title", "department",
 ]
 GROUP_ATTRS = ["cn", "description", "groupType", "member"]
+# Domain Controllers (516) and Read-only Domain Controllers (521) primary groups.
+DC_GROUP, RODC_GROUP = 516, 521
+DC_FILTER = f"(&(objectClass=computer)(|(primaryGroupID={DC_GROUP})(primaryGroupID={RODC_GROUP})))"
+DC_ATTRS = ["cn", "dNSHostName", "operatingSystem", "operatingSystemVersion", "primaryGroupID", "lastLogonTimestamp"]
 COMPUTER_ATTRS = [
     "cn", "dNSHostName", "operatingSystem", "operatingSystemVersion",
     "userAccountControl", "lastLogonTimestamp",
@@ -93,6 +97,14 @@ def _generalized_time(value) -> str | None:
         return str(value)
 
 
+def _rdn(dn: str, index: int) -> str:
+    """The value of the index-th component of a DN, e.g. _rdn("CN=a,CN=b", 1) == "b"."""
+    parts = [p for p in dn.split(",")]
+    if index >= len(parts):
+        return ""
+    return parts[index].split("=", 1)[-1].strip()
+
+
 def _contains(attrs: list[str], q: str) -> str:
     if not q:
         return ""
@@ -134,10 +146,15 @@ class ADConnector:
 
     # --- helpers -----------------------------------------------------------
 
-    def _search(self, filt: str, attrs: list[str], limit: int) -> list[dict]:
+    @property
+    def domain_dn(self) -> str:
+        """The domain root (DC=...) of the base DN, which may itself be an OU."""
+        return ",".join(p.strip() for p in self.base_dn.split(",") if p.strip().lower().startswith("dc="))
+
+    def _search(self, filt: str, attrs: list[str], limit: int, base: str | None = None) -> list[dict]:
         try:
             results = self._conn.extend.standard.paged_search(
-                self.base_dn, filt, SUBTREE, attributes=attrs, paged_size=500, generator=True
+                base or self.base_dn, filt, SUBTREE, attributes=attrs, paged_size=500, generator=True
             )
             out = []
             for item in results:
@@ -153,7 +170,7 @@ class ADConnector:
     def _domain_lockout_window(self) -> timedelta:
         """How long a lockout lasts, from the domain's password policy (read once per connection)."""
         if self._lockout_window is None:
-            domain_dn = ",".join(p for p in self.base_dn.split(",") if p.strip().lower().startswith("dc="))
+            domain_dn = self.domain_dn
             try:
                 self._conn.search(domain_dn, "(objectClass=*)", search_scope=BASE, attributes=["lockoutDuration"])
                 entries = [r for r in self._conn.response if r.get("type") == "searchResEntry"]
@@ -246,6 +263,58 @@ class ADConnector:
                 "last_logon": _filetime(_first(c, "lastLogonTimestamp")),
             })
         return out
+
+    def _read(self, dn: str, attrs: list[str]) -> dict:
+        """Attributes of one object, or {} if it can't be read."""
+        try:
+            self._conn.search(dn, "(objectClass=*)", search_scope=BASE, attributes=attrs)
+        except LDAPException:
+            return {}
+        entries = [r for r in self._conn.response if r.get("type") == "searchResEntry"]
+        return entries[0]["attributes"] if entries else {}
+
+    def domain_controllers(self) -> list[dict]:
+        """Every DC in the domain, with its site, Global Catalog flag and FSMO roles."""
+        dcs = self._search(DC_FILTER, DC_ATTRS, 1000, base=self.domain_dn)
+
+        root = self._read("", ["configurationNamingContext", "schemaNamingContext"])
+        config = _first(root, "configurationNamingContext") or f"CN=Configuration,{self.domain_dn}"
+        schema = _first(root, "schemaNamingContext") or f"CN=Schema,{config}"
+
+        # NTDS Settings objects: CN=NTDS Settings,CN=<server>,CN=Servers,CN=<site>,CN=Sites,...
+        servers = {}
+        try:
+            for ntds in self._search("(objectClass=nTDSDSA)", ["options"], 1000, base=f"CN=Sites,{config}"):
+                server, site = _rdn(ntds["dn"], 1), _rdn(ntds["dn"], 3)
+                servers[server.lower()] = {"site": site, "gc": bool(_int(_first(ntds, "options")) & 1)}
+        except ConnectorError:
+            pass
+
+        roles: dict[str, list[str]] = {}
+        for role, dn in (("PDC", self.domain_dn), ("RID", f"CN=RID Manager$,CN=System,{self.domain_dn}"),
+                         ("Infrastructure", f"CN=Infrastructure,{self.domain_dn}"),
+                         ("Domain naming", f"CN=Partitions,{config}"), ("Schema", schema)):
+            owner = _first(self._read(dn, ["fSMORoleOwner"]), "fSMORoleOwner")
+            if owner:
+                roles.setdefault(_rdn(str(owner), 1).lower(), []).append(role)
+
+        out = []
+        for dc in dcs:
+            name = _first(dc, "cn") or ""
+            info = servers.get(name.lower(), {})
+            out.append({
+                "dn": dc["dn"],
+                "name": name,
+                "dns_name": _first(dc, "dNSHostName"),
+                "os": _first(dc, "operatingSystem"),
+                "os_version": _first(dc, "operatingSystemVersion"),
+                "read_only": _int(_first(dc, "primaryGroupID")) == RODC_GROUP,
+                "site": info.get("site"),
+                "global_catalog": info.get("gc", False),
+                "roles": roles.get(name.lower(), []),
+                "last_logon": _filetime(_first(dc, "lastLogonTimestamp")),
+            })
+        return sorted(out, key=lambda d: d["name"].lower())
 
     # --- actions -----------------------------------------------------------
 

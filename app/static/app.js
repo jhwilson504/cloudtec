@@ -676,6 +676,62 @@ async function renderConnections() {
   }
 }
 
+// ---- Domain controllers ----------------------------------------------------
+
+async function renderDCs() {
+  loading();
+  const conns = (await api("GET", "/api/connections")).filter((c) => c.kind === "ad");
+  const head = `<div class="page-head"><div><h1>Domain controllers</h1>
+      <p class="muted" style="margin:0">Every DC in the domain, its roles, and whether this computer can reach it.</p></div>
+      ${conns.length ? '<button class="btn" id="dc-refresh">Refresh</button>' : ""}</div>`;
+  if (!conns.length) { view.innerHTML = head + noConnections("ad"); return; }
+  if (!conns.some((c) => c.id === state.ad)) state.ad = conns[0].id;
+
+  view.innerHTML = `${head}
+    <div class="toolbar">${connectionPicker(conns, state.ad, "dc-conn")}</div>
+    <div id="dc-body"><p class="muted">Finding domain controllers and checking their ports…</p></div>`;
+
+  async function load() {
+    const box = $("#dc-body");
+    box.innerHTML = '<p class="muted">Finding domain controllers and checking their ports…</p>';
+    try {
+      const { dcs, ports } = await api("GET", `/api/ad/${state.ad}/domain-controllers`);
+      const count = (f) => dcs.filter(f).length;
+      const stat = (label, value, sub = "") =>
+        `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+      const roleBadges = (d) => [
+        d.global_catalog ? '<span class="badge info">Global Catalog</span>' : "",
+        d.read_only ? '<span class="badge warn">Read-only</span>' : "",
+        ...d.roles.map((r) => `<span class="badge ok" title="FSMO role">${esc(r)}</span>`),
+      ].join(" ") || '<span class="muted">–</span>';
+      const portBadges = (d) => Object.entries(ports).map(([p, label]) =>
+        `<span class="badge ${d.ports[p] ? "ok" : "bad"}" title="${esc(label)}: ${d.ports[p] ? "reachable" : "not reachable"} from this computer">${p}</span>`).join(" ");
+
+      box.innerHTML = `<div class="stats">
+          ${stat("Domain controllers", dcs.length, `${count((d) => d.read_only)} read-only`)}
+          ${stat("Global Catalogs", count((d) => d.global_catalog))}
+          ${stat("Sites", new Set(dcs.map((d) => d.site).filter(Boolean)).size)}
+          ${stat("Reachable on 9389", `${count((d) => d.ports["9389"])} / ${dcs.length}`, "needed by PowerShell AD commands")}
+        </div>
+        ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon"], dcs.map((d) => `<tr>
+          <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div></td>
+          <td>${esc(d.site || "–")}</td>
+          <td>${esc(d.os || "–")}<div class="sub">${esc(d.os_version || "")}</div></td>
+          <td>${roleBadges(d)}</td>
+          <td style="white-space:nowrap">${portBadges(d)}</td>
+          <td>${fmtDate(d.last_logon)}</td></tr>`), "No domain controllers found.")}
+        <p class="muted small-note">Ports: ${Object.entries(ports).map(([p, l]) => `${p} ${esc(l)}`).join(" · ")}.
+          Green means the computer running CloudTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;
+    } catch (err) {
+      box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+    }
+  }
+
+  $("#dc-conn")?.addEventListener("change", (e) => { state.ad = e.target.value; load(); });
+  $("#dc-refresh").onclick = load;
+  load();
+}
+
 // ---- Reset password --------------------------------------------------------
 
 async function renderReset() {
@@ -914,6 +970,7 @@ const routes = {
   connections: renderConnections,
   powershell: renderShell,
   reset: renderReset,
+  dcs: renderDCs,
   settings: renderSettings,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };

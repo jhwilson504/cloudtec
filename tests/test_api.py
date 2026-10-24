@@ -216,3 +216,21 @@ def test_reset_password_can_unlock(client):
     assert r.status_code == 200
     after = {u["dn"]: u for u in client.get(f"/api/ad/{ad}/users").json()}[locked["dn"]]
     assert after["locked"] is False
+
+
+def test_port_open():
+    import socket
+    from app.main import port_open
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0)); srv.listen()
+        port = srv.getsockname()[1]
+        assert port_open("127.0.0.1", port) is True
+    assert port_open("127.0.0.1", port, timeout=0.5) is False
+
+
+def test_domain_controllers_endpoint(client):
+    ad = add_demo(client, "ad", "Corp")
+    r = client.get(f"/api/ad/{ad}/domain-controllers").json()
+    assert r["ports"]["9389"] == "AD Web Services"
+    assert r["dcs"] and all(set(d["ports"]) == {"389", "636", "3268", "9389"} for d in r["dcs"])
+    assert any("PDC" in d["roles"] for d in r["dcs"])

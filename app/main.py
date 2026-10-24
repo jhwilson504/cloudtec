@@ -1,6 +1,7 @@
 """CloudTec Center: one console for Active Directory and vSphere."""
 
 import logging
+import socket
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -68,6 +69,18 @@ class PowerBody(BaseModel):
 
 def _clean_config(kind: str, config: dict) -> dict:
     return {k: config[k] for k in CONFIG_FIELDS[kind] if k in config and config[k] not in ("", None)}
+
+
+# Ports checked on each domain controller, from the computer CloudTec runs on.
+DC_PORTS = {389: "LDAP", 636: "LDAPS", 3268: "Global Catalog", 9389: "AD Web Services"}
+
+
+def port_open(host: str, port: int, timeout: float = 1.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _short_name(name: str | None) -> str:
@@ -303,6 +316,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True, "cwd": session.cwd}
 
     # --- Active Directory --------------------------------------------------
+
+    @app.get("/api/ad/{conn_id}/domain-controllers", dependencies=api)
+    def ad_domain_controllers(conn_id: str):
+        with open_connector(get_conn(conn_id, "ad")) as c:
+            dcs = c.domain_controllers()
+        checks = [(dc, port) for dc in dcs if "ports" not in dc for port in DC_PORTS]
+        if checks:
+            with ThreadPoolExecutor(max_workers=min(32, len(checks))) as pool:
+                results = list(pool.map(lambda x: port_open(x[0]["dns_name"] or x[0]["name"], x[1]), checks))
+            for (dc, port), ok in zip(checks, results):
+                dc.setdefault("ports", {})[str(port)] = ok
+        return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()}}
 
     @app.get("/api/ad/{conn_id}/users", dependencies=api)
     def ad_users(conn_id: str, q: str = ""):

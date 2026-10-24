@@ -115,3 +115,26 @@ def test_reset_password_with_unlock_and_must_change(ad):
     attrs = ad._conn.response[0]["attributes"]
     assert str(attrs["pwdLastSet"]) in ("0", "1601-01-01 00:00:00+00:00")
     assert str(attrs["lockoutTime"]) in ("0", "1601-01-01 00:00:00+00:00")
+
+
+def test_domain_controllers(ad):
+    add = ad._conn.strategy.add_entry
+    config = f"CN=Configuration,{BASE}"
+    add(f"CN=DC01,OU=Domain Controllers,{BASE}", {
+        "objectClass": ["top", "computer"], "cn": "DC01", "dNSHostName": "dc01.corp.example.com",
+        "operatingSystem": "Windows Server 2022 Standard", "primaryGroupID": 516})
+    add(f"CN=RODC01,OU=Domain Controllers,{BASE}", {
+        "objectClass": ["top", "computer"], "cn": "RODC01", "dNSHostName": "rodc01.corp.example.com",
+        "primaryGroupID": 521})
+    add(f"CN=NTDS Settings,CN=DC01,CN=Servers,CN=HQ,CN=Sites,{config}", {"objectClass": ["top", "nTDSDSA"], "options": 1})
+    add(f"CN=NTDS Settings,CN=RODC01,CN=Servers,CN=Branch,CN=Sites,{config}", {"objectClass": ["top", "nTDSDSA"], "options": 0})
+    ntds = f"CN=NTDS Settings,CN=DC01,CN=Servers,CN=HQ,CN=Sites,{config}"
+    add(BASE, {"objectClass": ["top", "domain"], "fSMORoleOwner": ntds})
+    add(f"CN=RID Manager$,CN=System,{BASE}", {"objectClass": ["top", "rIDManager"], "fSMORoleOwner": ntds})
+
+    dcs = {d["name"]: d for d in ad.domain_controllers()}
+    assert set(dcs) == {"DC01", "RODC01"}          # ordinary computers are left out
+    assert dcs["DC01"]["site"] == "HQ" and dcs["DC01"]["global_catalog"] is True
+    assert dcs["DC01"]["read_only"] is False and dcs["DC01"]["roles"] == ["PDC", "RID"]
+    assert dcs["RODC01"]["site"] == "Branch" and dcs["RODC01"]["read_only"] is True
+    assert dcs["RODC01"]["global_catalog"] is False and dcs["RODC01"]["roles"] == []

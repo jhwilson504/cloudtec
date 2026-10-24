@@ -129,6 +129,20 @@ class DemoAD:
         return [dict(c) for c in self.data["computers"]
                 if _match(q, c["name"], c["dns_name"], c["os"])][:limit]
 
+    def domain_controllers(self) -> list[dict]:
+        sites = ["Nassau-HQ", "Nassau-HQ", "Freeport"]
+        out = []
+        for i, c in enumerate([c for c in self.data["computers"] if c["name"].startswith("SRV-DC")]):
+            out.append({
+                "dn": c["dn"], "name": c["name"], "dns_name": c["dns_name"], "os": c["os"],
+                "os_version": c["os_version"], "read_only": i == 2, "site": sites[i % len(sites)],
+                "global_catalog": i != 2, "last_logon": c["last_logon"],
+                "roles": ["PDC", "RID", "Infrastructure", "Domain naming", "Schema"] if i == 0 else [],
+                # Sample reachability: the branch DC has AD Web Services blocked.
+                "ports": {"389": True, "636": True, "3268": i != 2, "9389": i != 2},
+            })
+        return out
+
     def _user(self, dn: str) -> dict:
         for u in self.data["users"]:
             if u["dn"] == dn:
