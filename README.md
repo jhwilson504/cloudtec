@@ -61,6 +61,19 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 | `CLOUDTEC_SHELL` | `local` | The PowerShell page: `local` allows it only in a browser on the same computer (`localhost`), `on` allows it from anywhere, `off` disables it. |
 | `CLOUDTEC_POWERSHELL` | auto | Path to the PowerShell to use. By default `pwsh` (PowerShell 7) if installed, otherwise `powershell` (Windows PowerShell). |
 
+## Users and roles
+
+Sign in as **admin** with the admin password, then add people under **Users**. Each person signs in with their own username and password.
+
+| Role | Can |
+|---|---|
+| Administrator | Everything, including Connections, Users and the PowerShell page |
+| Operator | Dashboard, search, Active Directory (unlock, enable/disable, reset passwords), Domain controllers, vSphere (VM power), Cross-check, and changing their own password |
+
+- Passwords are stored as salted scrypt hashes. Disabling, deleting or resetting a user's password signs them out everywhere.
+- After 5 wrong passwords for a username from one address within 10 minutes, sign-in is refused for that username and address for the rest of the 10 minutes.
+- Every sign-in (and failed attempt), AD change, VM power action, connection change and user change is written to `<data dir>/audit.log` (one JSON object per line), and the latest are shown under **Users → Recent activity**.
+
 ## Admin password
 
 - **Change it** under **Settings** after you sign in. The new password is stored as a salted hash in `<data dir>/admin_password.hash`, and any other signed-in browsers are signed out.

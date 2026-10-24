@@ -1,9 +1,13 @@
 """CloudTec Center: one console for Active Directory and vSphere."""
 
+import json
 import logging
+import re
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -12,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .auth import COOKIE, AdminPassword, PasswordError, Sessions
+from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
 from .connectors import ConnectorError, open_connector
 from .shell import PowerShellSession, connect_script, find_powershell
@@ -28,8 +32,27 @@ CONFIG_FIELDS = {
 }
 
 
+ADMIN = "admin"  # the built-in administrator account
+USERNAME = re.compile(r"^[A-Za-z0-9._-]{2,40}$")
+
+
 class LoginBody(BaseModel):
+    username: str = ADMIN
     password: str
+
+
+class NewUserBody(BaseModel):
+    username: str
+    display_name: str = Field(default="", max_length=80)
+    role: Literal["admin", "operator"] = "operator"
+    password: str = Field(min_length=8, max_length=256)
+
+
+class UpdateUserBody(BaseModel):
+    display_name: str | None = Field(default=None, max_length=80)
+    role: Literal["admin", "operator"] | None = None
+    disabled: bool | None = None
+    password: str | None = Field(default=None, min_length=8, max_length=256)
 
 
 class ChangePasswordBody(BaseModel):
@@ -93,6 +116,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     store = Store(settings.data_dir, load_or_create_key(settings.data_dir, settings.secret_key))
     admin = AdminPassword(settings.data_dir, settings.admin_password)
     sessions = Sessions(settings.session_hours * 3600)
+    throttle = LoginThrottle()
+    audit_path = settings.data_dir / "audit.log"
+    audit_lock = threading.Lock()
     exe = find_powershell(settings.powershell)
     shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
 
@@ -109,9 +135,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def connector_error(_: Request, exc: ConnectorError):
         return JSONResponse(status_code=502, content={"detail": str(exc)})
 
-    def require_session(request: Request) -> None:
-        if not sessions.valid(request.cookies.get(COOKIE)):
+    def lookup(username: str | None) -> dict | None:
+        """The signed-in user's details, or None if the account is gone or disabled."""
+        if not username:
+            return None
+        if username.lower() == ADMIN:
+            return {"username": ADMIN, "display_name": "Administrator", "role": "admin", "builtin": True}
+        user = store.get_user(username)
+        if not user or user.disabled:
+            return None
+        return {"username": user.username, "display_name": user.display_name or user.username,
+                "role": user.role, "builtin": False}
+
+    def require_session(request: Request) -> dict:
+        token = request.cookies.get(COOKIE)
+        user = lookup(sessions.user(token))
+        if not user:
+            sessions.revoke(token)
             raise HTTPException(401, "Not signed in")
+        request.state.user = user
+        return user
+
+    def require_admin(request: Request) -> dict:
+        user = require_session(request)
+        if user["role"] != "admin":
+            raise HTTPException(403, "Only administrators can do this.")
+        return user
+
+    def audit(request: Request, action: str, target: str = "", connection: Connection | None = None) -> None:
+        """Append who did what to <data dir>/audit.log (one JSON object per line)."""
+        user = getattr(request.state, "user", None)
+        entry = {
+            "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "user": user["username"] if user else None,
+            "action": action,
+            "target": target,
+            "connection": connection.name if connection else None,
+            "address": request.client.host if request.client else None,
+        }
+        with audit_lock, audit_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def get_conn(conn_id: str, kind: str) -> Connection:
         conn = store.get(conn_id)
@@ -138,13 +201,34 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- session -----------------------------------------------------------
 
+    def password_ok(username: str, password: str) -> bool:
+        if username.lower() == ADMIN:
+            return admin.check(password)
+        user = store.get_user(username)
+        if not user or user.disabled:
+            verify_hash(password, hash_password("timing"))  # same work either way, so timing reveals nothing
+            return False
+        return verify_hash(password, user.password_hash)
+
     @app.post("/api/login")
-    def login(body: LoginBody, response: Response):
-        if not admin.check(body.password):
-            raise HTTPException(401, "Wrong password")
-        response.set_cookie(COOKIE, sessions.create(), httponly=True, samesite="strict",
+    def login(body: LoginBody, request: Request, response: Response):
+        username = body.username.strip() or ADMIN
+        address = request.client.host if request.client else ""
+        wait = throttle.blocked_for(username, address)
+        if wait:
+            raise HTTPException(429, f"Too many wrong passwords. Try again in {max(1, round(wait / 60))} minute(s).")
+        if not password_ok(username, body.password):
+            throttle.failed(username, address)
+            request.state.user = {"username": username}
+            audit(request, "sign-in failed")
+            raise HTTPException(401, "Wrong username or password")
+        throttle.succeeded(username, address)
+        user = lookup(username)
+        request.state.user = user
+        audit(request, "signed in")
+        response.set_cookie(COOKIE, sessions.create(user["username"]), httponly=True, samesite="strict",
                             secure=settings.secure_cookies, max_age=settings.session_hours * 3600)
-        return {"ok": True}
+        return {"ok": True, **user}
 
     @app.post("/api/logout")
     def logout(request: Request, response: Response):
@@ -154,24 +238,103 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/me")
     def me(request: Request):
-        return {"signed_in": sessions.valid(request.cookies.get(COOKIE))}
+        user = lookup(sessions.user(request.cookies.get(COOKIE)))
+        return {"signed_in": True, **user} if user else {"signed_in": False}
 
     api = [Depends(require_session)]
+    admin_only = [Depends(require_admin)]
 
     # --- settings ----------------------------------------------------------
 
-    @app.get("/api/settings", dependencies=api)
-    def get_settings():
-        return {"password_from_env": admin.from_env}
+    @app.get("/api/settings")
+    def get_settings(user: dict = Depends(require_session)):
+        return {"password_from_env": user["builtin"] and admin.from_env}
 
-    @app.post("/api/settings/password", dependencies=api)
-    def change_password(body: ChangePasswordBody, request: Request):
-        try:
-            admin.change(body.current_password, body.new_password)
-        except PasswordError as e:
-            raise HTTPException(409 if admin.from_env else 400, str(e)) from e
-        sessions.revoke_others(request.cookies.get(COOKIE))
+    @app.post("/api/settings/password")
+    def change_password(body: ChangePasswordBody, request: Request, user: dict = Depends(require_session)):
+        if user["builtin"]:
+            try:
+                admin.change(body.current_password, body.new_password)
+            except PasswordError as e:
+                raise HTTPException(409 if admin.from_env else 400, str(e)) from e
+        else:
+            if not password_ok(user["username"], body.current_password):
+                raise HTTPException(400, "Current password is incorrect")
+            store.update_user(user["username"], password_hash=hash_password(body.new_password))
+        sessions.revoke_user(user["username"], keep=request.cookies.get(COOKIE))
+        audit(request, "changed own password")
         return {"ok": True}
+
+    # --- console users -----------------------------------------------------
+
+    def clean_username(name: str) -> str:
+        name = name.strip()
+        if not USERNAME.match(name):
+            raise HTTPException(422, "Usernames are 2-40 letters, numbers, dots, dashes or underscores.")
+        if name.lower() == ADMIN:
+            raise HTTPException(422, "'admin' is the built-in administrator account.")
+        return name
+
+    @app.get("/api/users", dependencies=admin_only)
+    def list_users():
+        builtin = {"username": ADMIN, "display_name": "Administrator", "role": "admin",
+                   "disabled": False, "created_at": None, "builtin": True}
+        return [builtin] + [u.public() for u in store.list_users()]
+
+    @app.post("/api/users", dependencies=admin_only, status_code=201)
+    def add_user(body: NewUserBody, request: Request):
+        username = clean_username(body.username)
+        if store.get_user(username):
+            raise HTTPException(409, f"There's already a user called {username}.")
+        user = store.add_user(username, body.display_name.strip(), body.role, hash_password(body.password))
+        audit(request, f"added user ({body.role})", username)
+        return user.public()
+
+    @app.patch("/api/users/{username}", dependencies=admin_only)
+    def update_user(username: str, body: UpdateUserBody, request: Request):
+        if username.lower() == ADMIN:
+            raise HTTPException(422, "The built-in admin account can't be changed here. Use Settings to change its password.")
+        if not store.get_user(username):
+            raise HTTPException(404, "User not found")
+        fields = {}
+        if body.display_name is not None:
+            fields["display_name"] = body.display_name.strip()
+        if body.role is not None:
+            fields["role"] = body.role
+        if body.disabled is not None:
+            fields["disabled"] = body.disabled
+        if body.password is not None:
+            fields["password_hash"] = hash_password(body.password)
+        user = store.update_user(username, **fields)
+        if body.disabled or body.password is not None:
+            sessions.revoke_user(username)  # sign them out everywhere
+        changes = ", ".join(("new password" if k == "password_hash" else f"{k}={v}")
+                            for k, v in fields.items())
+        audit(request, f"updated user ({changes})", username)
+        return user.public()
+
+    @app.delete("/api/users/{username}", dependencies=admin_only)
+    def delete_user(username: str, request: Request):
+        if username.lower() == ADMIN:
+            raise HTTPException(422, "The built-in admin account can't be deleted.")
+        if not store.delete_user(username):
+            raise HTTPException(404, "User not found")
+        sessions.revoke_user(username)
+        audit(request, "deleted user", username)
+        return {"ok": True}
+
+    @app.get("/api/audit", dependencies=admin_only)
+    def audit_log(limit: int = 200):
+        if not audit_path.exists():
+            return []
+        lines = audit_path.read_text(encoding="utf-8").splitlines()[-max(1, min(limit, 2000)):]
+        out = []
+        for line in reversed(lines):
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
 
     # --- connections -------------------------------------------------------
 
@@ -179,15 +342,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_connections():
         return [c.public() for c in store.list()]
 
-    @app.post("/api/connections", dependencies=api, status_code=201)
-    def add_connection(body: ConnectionBody):
+    @app.post("/api/connections", dependencies=admin_only, status_code=201)
+    def add_connection(body: ConnectionBody, request: Request):
         if not body.demo and not body.password:
             raise HTTPException(422, "A password is required")
         conn = store.add(body.kind, body.name.strip(), _clean_config(body.kind, body.config),
                          body.password, body.demo)
+        audit(request, "added connection", conn.name, conn)
         return conn.public()
 
-    @app.post("/api/connections/test", dependencies=api)
+    @app.post("/api/connections/test", dependencies=admin_only)
     def test_unsaved(body: ConnectionBody):
         draft = Connection(id="draft", kind=body.kind, name=body.name,
                            config=_clean_config(body.kind, body.config),
@@ -195,7 +359,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with open_connector(draft) as c:
             return c.test()
 
-    @app.post("/api/connections/{conn_id}/test", dependencies=api)
+    @app.post("/api/connections/{conn_id}/test", dependencies=admin_only)
     def test_saved(conn_id: str):
         conn = store.get(conn_id)
         if not conn:
@@ -203,10 +367,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with open_connector(conn) as c:
             return c.test()
 
-    @app.delete("/api/connections/{conn_id}", dependencies=api)
-    def delete_connection(conn_id: str):
-        if not store.delete(conn_id):
+    @app.delete("/api/connections/{conn_id}", dependencies=admin_only)
+    def delete_connection(conn_id: str, request: Request):
+        conn = store.get(conn_id)
+        if not conn or not store.delete(conn_id):
             raise HTTPException(404, "Connection not found")
+        audit(request, "removed connection", conn.name, conn)
         return {"ok": True}
 
     # --- overview ----------------------------------------------------------
@@ -291,15 +457,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(403, status["reason"])
         return shell
 
-    @app.get("/api/shell", dependencies=api)
+    @app.get("/api/shell", dependencies=admin_only)
     def get_shell(request: Request):
         return shell_status(request)
 
-    @app.post("/api/shell/run", dependencies=api)
+    @app.post("/api/shell/run", dependencies=admin_only)
     def shell_run(body: ShellBody, request: Request):
         return require_shell(request).run(body.command)
 
-    @app.post("/api/shell/connect", dependencies=api)
+    @app.post("/api/shell/connect", dependencies=admin_only)
     def shell_connect(body: ShellConnectBody, request: Request):
         session = require_shell(request)
         conn = store.get(body.connection_id)
@@ -307,9 +473,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Connection not found")
         if conn.demo:
             raise HTTPException(422, f"{conn.name} is a demo connection, so there's no real server to connect to.")
+        audit(request, "PowerShell: signed session in", conn.name, conn)
         return session.run(connect_script(conn), timeout=120, log_as=f"[connect] {conn.name} ({conn.kind})")
 
-    @app.post("/api/shell/reset", dependencies=api)
+    @app.post("/api/shell/reset", dependencies=admin_only)
     def shell_reset(request: Request):
         session = require_shell(request)
         session.reset()
@@ -345,27 +512,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return c.computers(q.strip())
 
     @app.post("/api/ad/{conn_id}/users/enable", dependencies=api)
-    def ad_enable(conn_id: str, body: DnBody):
-        with open_connector(get_conn(conn_id, "ad")) as c:
+    def ad_enable(conn_id: str, body: DnBody, request: Request):
+        conn = get_conn(conn_id, "ad")
+        with open_connector(conn) as c:
             c.set_enabled(body.dn, True)
+        audit(request, "enabled AD account", body.dn, conn)
         return {"ok": True}
 
     @app.post("/api/ad/{conn_id}/users/disable", dependencies=api)
-    def ad_disable(conn_id: str, body: DnBody):
-        with open_connector(get_conn(conn_id, "ad")) as c:
+    def ad_disable(conn_id: str, body: DnBody, request: Request):
+        conn = get_conn(conn_id, "ad")
+        with open_connector(conn) as c:
             c.set_enabled(body.dn, False)
+        audit(request, "disabled AD account", body.dn, conn)
         return {"ok": True}
 
     @app.post("/api/ad/{conn_id}/users/unlock", dependencies=api)
-    def ad_unlock(conn_id: str, body: DnBody):
-        with open_connector(get_conn(conn_id, "ad")) as c:
+    def ad_unlock(conn_id: str, body: DnBody, request: Request):
+        conn = get_conn(conn_id, "ad")
+        with open_connector(conn) as c:
             c.unlock(body.dn)
+        audit(request, "unlocked AD account", body.dn, conn)
         return {"ok": True}
 
     @app.post("/api/ad/{conn_id}/users/reset-password", dependencies=api)
-    def ad_reset_password(conn_id: str, body: PasswordBody):
-        with open_connector(get_conn(conn_id, "ad")) as c:
+    def ad_reset_password(conn_id: str, body: PasswordBody, request: Request):
+        conn = get_conn(conn_id, "ad")
+        with open_connector(conn) as c:
             c.reset_password(body.dn, body.new_password, unlock=body.unlock, must_change=body.must_change)
+        extras = [x for x, on in (("unlocked", body.unlock), ("must change at next sign-in", body.must_change)) if on]
+        audit(request, "reset AD password" + (f" ({', '.join(extras)})" if extras else ""), body.dn, conn)
         return {"ok": True}
 
     # --- vSphere -----------------------------------------------------------
@@ -381,9 +557,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return c.vm(vm_id)
 
     @app.post("/api/vsphere/{conn_id}/vms/{vm_id}/power", dependencies=api)
-    def vs_power(conn_id: str, vm_id: str, body: PowerBody):
-        with open_connector(get_conn(conn_id, "vsphere")) as c:
+    def vs_power(conn_id: str, vm_id: str, body: PowerBody, request: Request):
+        conn = get_conn(conn_id, "vsphere")
+        with open_connector(conn) as c:
             c.power(vm_id, body.action)
+        audit(request, f"VM power: {body.action}", vm_id, conn)
         return {"ok": True}
 
     @app.get("/api/vsphere/{conn_id}/hosts", dependencies=api)

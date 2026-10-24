@@ -12,8 +12,11 @@
     <form id="login-form" class="card login-card">
       <div class="brand big"><span class="logo">◆</span> CloudTec Center</div>
       <p class="muted">Active Directory and vSphere in one console.</p>
-      <label>Admin password
-        <input type="password" id="login-password" autocomplete="current-password" required autofocus>
+      <label>Username
+        <input type="text" id="login-username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </label>
+      <label>Password
+        <input type="password" id="login-password" autocomplete="current-password" required>
       </label>
       <p id="login-error" class="error"></p>
       <button class="btn primary" type="submit">Sign in</button>
@@ -30,10 +33,13 @@
         <a href="#/dcs" data-nav="dcs">Domain controllers</a>
         <a href="#/vsphere" data-nav="vsphere">vSphere</a>
         <a href="#/crosscheck" data-nav="crosscheck">Cross-check</a>
-        <a href="#/powershell" data-nav="powershell"><img src="/static/powershell.svg" alt="" class="nav-icon"> PowerShell</a>
-        <a href="#/connections" data-nav="connections">Connections</a>
+        <a href="#/powershell" data-nav="powershell" data-admin><img src="/static/powershell.svg" alt="" class="nav-icon"> PowerShell</a>
+        <a href="#/connections" data-nav="connections" data-admin>Connections</a>
+        <a href="#/users" data-nav="users" data-admin>Users</a>
         <a href="#/settings" data-nav="settings">Settings</a>
       </nav>
+      <div class="whoami"><div class="muted small-note" style="margin:0">Signed in as</div><b id="whoami-name"></b>
+        <div class="muted small-note" style="margin:0" id="whoami-role"></div></div>
       <button id="logout" class="btn ghost small">Sign out</button>
     </aside>
     <main>

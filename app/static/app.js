@@ -118,8 +118,11 @@ function connectionPicker(conns, selected, id) {
     `<option value="${esc(c.id)}" ${c.id === selected ? "selected" : ""}>${esc(c.name)}${c.demo ? " (demo)" : ""}</option>`).join("")}</select>`;
 }
 
+const isAdmin = () => state.me?.role === "admin";
+
 function noConnections(kind) {
   const label = kind === "ad" ? "Active Directory domain" : "vCenter";
+  if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a CloudTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
     <a class="btn primary" href="#/connections" onclick="state.connKind='${kind}'">Add a ${label}</a></div>`;
 }
@@ -184,16 +187,25 @@ enhancePasswords();
 
 // ---- auth ----------------------------------------------------------------
 
+function rememberedUsername() {
+  try { return localStorage.getItem("cloudtec.username") || "admin"; } catch { return "admin"; }
+}
+
 function showLogin() {
+  state.me = null;
   $("#shell").classList.add("hidden");
   $("#login").classList.remove("hidden");
-  $("#login-password").focus();
+  const user = $("#login-username");
+  if (!user.value) user.value = rememberedUsername();
+  (user.value ? $("#login-password") : user).focus();
 }
 
 $("#login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
+  const username = $("#login-username").value.trim();
   try {
-    await api("POST", "/api/login", { password: $("#login-password").value });
+    state.me = await api("POST", "/api/login", { username, password: $("#login-password").value });
+    try { localStorage.setItem("cloudtec.username", username); } catch { /* private window */ }
     $("#login-password").value = "";
     $("#login-error").textContent = "";
     start();
@@ -290,6 +302,7 @@ function resetTile() {
 }
 
 function powershellTile() {
+  if (!isAdmin()) return "";
   return `<a class="card tool-tile" href="#/powershell">
     <img src="/static/powershell.svg" alt="" width="56" height="56">
     <div><b>PowerShell</b><div class="muted">Run PowerShell commands on this computer, right inside CloudTec.</div></div>
@@ -976,6 +989,132 @@ async function renderShell() {
   input.focus();
 }
 
+// ---- users ---------------------------------------------------------------
+
+const ROLE_INFO = {
+  admin: ["Administrator", "Everything, including Connections, Users and PowerShell."],
+  operator: ["Operator", "Day-to-day work: search, unlock, reset passwords, VM power. No Connections, Users or PowerShell."],
+};
+const roleBadge = (r) => `<span class="badge ${r === "admin" ? "info" : "plain"}">${ROLE_INFO[r]?.[0] ?? esc(r)}</span>`;
+const shortDn = (t) => (/^CN=((?:\\,|[^,])+)/i.exec(t || "")?.[1].replace(/\\,/g, ",") ?? t ?? "");
+
+function newPasswordFields() {
+  return `<div class="row" style="align-items:flex-end">
+      <label style="flex:1;min-width:200px">Password <input type="password" name="pw1" minlength="8" required autocomplete="new-password"></label>
+      <button type="button" class="btn" data-gen>Generate</button></div>
+    <label>Confirm password <input type="password" name="pw2" minlength="8" required autocomplete="new-password"></label>`;
+}
+
+function bindNewPassword(form) {
+  form.querySelector("[data-gen]").onclick = () => {
+    form.pw1.value = form.pw2.value = generatePassword();
+    form.pw1.type = form.pw2.type = "text";
+  };
+  return () => (form.pw1.value === form.pw2.value ? form.pw1.value : null);
+}
+
+function passwordHandover(name, password) {
+  modal(`<h2>Password set</h2>
+    <p>Give this password to <b>${esc(name)}</b>. They can change it under Settings after signing in.</p>
+    <p class="mono" style="font-size:15px;padding:10px;border:1px solid var(--border);border-radius:8px;user-select:all">${esc(password)}</p>
+    <div class="modal-actions"><button class="btn" id="pw-copy">Copy</button><button class="btn primary" data-close>Done</button></div>`);
+  $("#pw-copy").onclick = async () => {
+    try { await navigator.clipboard.writeText(password); toast("Password copied"); }
+    catch { toast("Couldn't copy. Select the password instead.", true); }
+  };
+}
+
+async function renderUsers() {
+  loading();
+  const [users, log] = await Promise.all([api("GET", "/api/users"), api("GET", "/api/audit?limit=100")]);
+  const rows = users.map((u, i) => `<tr>
+    <td><b>${esc(u.display_name || u.username)}</b><div class="sub mono">${esc(u.username)}</div></td>
+    <td>${roleBadge(u.role)}</td>
+    <td>${u.disabled ? '<span class="badge plain">Disabled</span>' : '<span class="badge ok">Active</span>'}</td>
+    <td>${u.created_at ? fmtDate(u.created_at) : '<span class="muted">built-in</span>'}</td>
+    <td class="actions">${u.builtin ? '<span class="muted small-note">Change its password under Settings</span>' : `
+      <button class="btn small" data-u="pw" data-i="${i}">Reset password</button>
+      <button class="btn small" data-u="role" data-i="${i}">${u.role === "admin" ? "Make operator" : "Make administrator"}</button>
+      <button class="btn small" data-u="toggle" data-i="${i}">${u.disabled ? "Enable" : "Disable"}</button>
+      <button class="btn small danger" data-u="delete" data-i="${i}">Delete</button>`}</td></tr>`);
+
+  view.innerHTML = `<div class="page-head"><div><h1>Users</h1>
+      <p class="muted" style="margin:0">People who can sign in to CloudTec. Each person gets their own account, so the activity log shows who did what.</p></div></div>
+    ${table(["User", "Role", "Status", "Added", ""], rows)}
+    <div class="card section"><h2>Add a user</h2>
+      <form id="user-form" class="form" autocomplete="off">
+        <label>Username <input name="username" required pattern="[A-Za-z0-9._\\-]{2,40}" placeholder="jsmith" autocapitalize="none" spellcheck="false"></label>
+        <label>Full name <input name="display_name" placeholder="Jane Smith"></label>
+        <label class="full">Role <select name="role">
+          <option value="operator">${ROLE_INFO.operator[0]}: ${ROLE_INFO.operator[1]}</option>
+          <option value="admin">${ROLE_INFO.admin[0]}: ${ROLE_INFO.admin[1]}</option></select></label>
+        <div class="full" style="display:grid;gap:12px">${newPasswordFields()}</div>
+        <p class="full error" id="user-err" style="margin:0"></p>
+        <div class="full"><button class="btn primary" type="submit">Add user</button></div>
+      </form></div>
+    <div class="section"><h2>Recent activity</h2>
+      ${table(["When", "Who", "What", "Target", "Connection"], log.map((e) => `<tr>
+        <td title="${esc(e.time)}">${esc(new Date(e.time).toLocaleString())}</td>
+        <td class="mono">${esc(e.user || "–")}</td>
+        <td>${e.action.startsWith("sign-in failed") ? `<span class="badge bad">${esc(e.action)}</span>` : esc(e.action)}</td>
+        <td title="${esc(e.target || "")}">${esc(shortDn(e.target)) || '<span class="muted">–</span>'}</td>
+        <td>${esc(e.connection || "")}</td></tr>`), "Nothing recorded yet.")}
+      <p class="muted small-note">The full log is in <code>data\\audit.log</code> in the CloudTec folder.</p></div>`;
+
+  const form = $("#user-form");
+  const readPw = bindNewPassword(form);
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const password = readPw();
+    if (!password) { $("#user-err").textContent = "The passwords don't match."; return; }
+    try {
+      const u = await api("POST", "/api/users", {
+        username: form.username.value.trim(), display_name: form.display_name.value.trim(),
+        role: form.role.value, password,
+      });
+      await renderUsers();
+      passwordHandover(u.display_name || u.username, password);
+    } catch (err) { $("#user-err").textContent = err.message; }
+  };
+
+  view.querySelectorAll("[data-u]").forEach((b) => b.onclick = async () => {
+    const u = users[b.dataset.i];
+    const name = esc(u.display_name || u.username);
+    try {
+      if (b.dataset.u === "pw") {
+        modal(`<h2>Reset password</h2><p>New CloudTec password for <b>${name}</b>. They'll be signed out everywhere.</p>
+          <form id="upw-form" style="display:grid;gap:12px">${newPasswordFields()}<p class="error" id="upw-err"></p>
+          <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button>
+          <button class="btn primary" type="submit">Set password</button></div></form>`);
+        const f = $("#upw-form"), read = bindNewPassword(f);
+        f.pw1.focus();
+        f.onsubmit = async (e) => {
+          e.preventDefault();
+          const password = read();
+          if (!password) { $("#upw-err").textContent = "The passwords don't match."; return; }
+          try {
+            await api("PATCH", `/api/users/${encodeURIComponent(u.username)}`, { password });
+            passwordHandover(u.display_name || u.username, password);
+          } catch (err) { $("#upw-err").textContent = err.message; }
+        };
+        return;
+      }
+      if (b.dataset.u === "role") {
+        const to = u.role === "admin" ? "operator" : "admin";
+        if (!(await confirmAction("Change role", `Make <b>${name}</b> an ${ROLE_INFO[to][0]}? ${esc(ROLE_INFO[to][1])}`, `Make ${ROLE_INFO[to][0].toLowerCase()}`))) return;
+        await api("PATCH", `/api/users/${encodeURIComponent(u.username)}`, { role: to });
+      } else if (b.dataset.u === "toggle") {
+        if (!u.disabled && !(await confirmAction("Disable user", `Disable <b>${name}</b>? They'll be signed out and can't sign in until you enable them again.`, "Disable", true))) return;
+        await api("PATCH", `/api/users/${encodeURIComponent(u.username)}`, { disabled: !u.disabled });
+      } else if (b.dataset.u === "delete") {
+        if (!(await confirmAction("Delete user", `Delete <b>${name}</b>'s CloudTec account? Their entries in the activity log are kept.`, "Delete", true))) return;
+        await api("DELETE", `/api/users/${encodeURIComponent(u.username)}`);
+      }
+      renderUsers();
+    } catch (err) { toast(err.message, true); }
+  });
+}
+
 // ---- settings ------------------------------------------------------------
 
 async function renderSettings() {
@@ -1025,11 +1164,18 @@ const routes = {
   reset: renderReset,
   dcs: renderDCs,
   settings: renderSettings,
+  users: renderUsers,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };
 
+const ADMIN_ROUTES = new Set(["connections", "users", "powershell"]);
+
 async function route() {
   const [, name = "dashboard", arg] = location.hash.split("/");
+  if (ADMIN_ROUTES.has(name) && !isAdmin()) {
+    location.hash = "#/dashboard";  // e.g. an operator signing in where an admin left off
+    return;
+  }
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === name));
   try {
     await (routes[name] ?? renderDashboard)(arg);
@@ -1041,8 +1187,11 @@ async function route() {
 function start() {
   $("#login").classList.add("hidden");
   $("#shell").classList.remove("hidden");
+  document.querySelectorAll("[data-admin]").forEach((el) => el.classList.toggle("hidden", !isAdmin()));
+  $("#whoami-name").textContent = state.me.display_name || state.me.username;
+  $("#whoami-role").textContent = ROLE_INFO[state.me.role]?.[0] ?? state.me.role;
   route();
 }
 
 window.addEventListener("hashchange", route);
-api("GET", "/api/me").then((r) => (r.signed_in ? start() : showLogin())).catch(showLogin);
+api("GET", "/api/me").then((r) => { if (r.signed_in) { state.me = r; start(); } else showLogin(); }).catch(showLogin);
