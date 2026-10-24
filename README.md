@@ -71,6 +71,10 @@ Commands run on the computer CloudTec runs on, as the Windows user who started C
 
 - By default the page only works in a browser on the same computer. Leave `CLOUDTEC_SHELL` at `local` unless you really need remote access, and if you do, serve CloudTec over HTTPS.
 - Every command is recorded with a timestamp in `<data dir>/shell_history.log`.
+- **Connect** (above the terminal) signs the session in to a saved connection with its stored account and password, without showing or logging them:
+  - *Active Directory*: AD cmdlets (`Get-ADUser`, `Set-ADUser`, …) then use that domain controller and account automatically. Needs the ActiveDirectory module (RSAT): `Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0` from an Administrator window.
+  - *vCenter*: runs `Connect-VIServer`, so PowerCLI cmdlets (`Get-VM`, `Start-VM`, …) work. Needs PowerCLI: `Install-Module VCF.PowerCLI -Scope CurrentUser`.
+  - The credential is also left in `$CloudTec['<connection name>'].Credential` for commands that take `-Credential`.
 - Commands can't answer prompts (they run non-interactively), so add `-Force` or `-Confirm:$false` where needed. A command that runs longer than 5 minutes is stopped and the session restarts.
 
 ## Requirements on the other side

@@ -103,12 +103,13 @@ class PowerShellSession:
             text = (text + "\n\n" if text else "") + note
         return {"output": text, "error": note is not None}
 
-    def run(self, command: str, timeout: float = 300) -> dict:
+    def run(self, command: str, timeout: float = 300, log_as: str | None = None) -> dict:
+        """Run a command. log_as replaces the command in the history log (used for scripts carrying passwords)."""
         with self._lock:
             if self.history:
                 stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 with self.history.open("a", encoding="utf-8") as f:
-                    f.write(f"{stamp}\t{command!r}\n")
+                    f.write(f"{stamp}\t{log_as or repr(command)}\n")
             if not self._proc or self._proc.poll() is not None:
                 self.cwd = str(self.start_dir)
                 self._start()
@@ -128,3 +129,64 @@ class PowerShellSession:
         with self._lock:
             self.close()
             self.cwd = str(self.start_dir)
+
+
+def ps_quote(value) -> str:
+    """A PowerShell single-quoted string literal."""
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+AD_MISSING = """The ActiveDirectory PowerShell module isn't installed on this computer.
+Install it once from an Administrator PowerShell window:
+    Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
+(On Windows Server: Install-WindowsFeature RSAT-AD-PowerShell)
+Then click Connect again. The saved credential is already available as $CloudTec[{name}].Credential."""
+
+VC_MISSING = """VMware PowerCLI isn't installed on this computer.
+Install it once (no Administrator needed):
+    Install-Module VCF.PowerCLI -Scope CurrentUser
+(Older name: VMware.PowerCLI.) Then click Connect again.
+The saved credential is already available as $CloudTec[{name}].Credential."""
+
+
+def connect_script(conn) -> str:
+    """PowerShell that signs this session in to a saved connection.
+
+    The password only travels inside the base64-encoded command over the
+    session's stdin, never on a command line, in the history log or in output.
+    Every value from the connection is passed as a single-quoted literal.
+    """
+    cfg = conn.config
+    host = cfg["host"]
+    name = ps_quote(conn.name)
+    user = cfg.get("bind_user") if conn.kind == "ad" else cfg.get("username")
+    if conn.kind == "ad":
+        body = f"""
+  if (Get-Module -ListAvailable -Name ActiveDirectory) {{
+    Import-Module ActiveDirectory -WarningAction SilentlyContinue
+    $PSDefaultParameterValues['*-AD*:Server'] = {ps_quote(host)}
+    $PSDefaultParameterValues['*-AD*:Credential'] = $__cred
+    {ps_quote(f"Connected to {conn.name} ({host}) as {user}.")}
+    'Active Directory commands such as Get-ADUser now use this domain automatically.'
+  }} else {{
+    {ps_quote(AD_MISSING.replace("{name}", name))}
+  }}"""
+    else:
+        cert = "Ignore" if cfg.get("verify_ssl") is False else "Fail"
+        body = f"""
+  if (Get-Module -ListAvailable -Name VMware.VimAutomation.Core) {{
+    Import-Module VMware.VimAutomation.Core -WarningAction SilentlyContinue
+    Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction {cert} -Confirm:$false | Out-Null
+    Connect-VIServer -Server {ps_quote(host)} -Port {int(cfg.get("port") or 443)} -Credential $__cred -ErrorAction Stop | Out-Null
+    {ps_quote(f"Connected to vCenter {conn.name} ({host}) as {user}.")}
+    'PowerCLI commands such as Get-VM and Get-VMHost now work.'
+  }} else {{
+    {ps_quote(VC_MISSING.replace("{name}", name))}
+  }}"""
+    return f"""if (-not $global:CloudTec) {{ $global:CloudTec = @{{}} }}
+try {{
+  $__cred = New-Object System.Management.Automation.PSCredential({ps_quote(user)}, (ConvertTo-SecureString {ps_quote(conn.secret)} -AsPlainText -Force))
+  $global:CloudTec[{name}] = @{{ Server = {ps_quote(host)}; Credential = $__cred }}{body}
+}} finally {{
+  Remove-Variable __cred -ErrorAction SilentlyContinue
+}}"""

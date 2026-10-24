@@ -624,7 +624,14 @@ const shellHistory = [];  // commands, for the up/down arrow keys
 
 async function renderShell() {
   loading();
-  const s = await api("GET", "/api/shell");
+  const [s, conns] = await Promise.all([api("GET", "/api/shell"), api("GET", "/api/connections")]);
+  const real = conns.filter((c) => !c.demo);
+  const connectBar = real.length
+    ? `<div class="toolbar"><span class="muted">Sign this session in to</span>
+        <select id="sh-conn">${real.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.kind === "ad" ? "Active Directory" : "vCenter"})</option>`).join("")}</select>
+        <button class="btn primary" id="sh-connect">Connect</button>
+        <span class="muted small-note" style="margin:0">Uses the account and password saved in Connections.</span></div>`
+    : `<p class="muted">Add an Active Directory or vCenter on the <a href="#/connections">Connections</a> page to sign this session in to it with one click.</p>`;
   const head = `<div class="page-head"><div class="row" style="gap:12px">
       <img src="/static/powershell.svg" alt="" width="40" height="40">
       <div><h1>PowerShell</h1><p class="muted" style="margin:0">Commands run on the computer CloudTec is running on, as the user who started it.</p></div>
@@ -634,7 +641,7 @@ async function renderShell() {
     return;
   }
   let cwd = s.cwd;
-  view.innerHTML = `${head}
+  view.innerHTML = `${head}${connectBar}
     <div class="term" id="term">
       <pre id="term-out"></pre>
       <div class="term-input"><span id="term-prompt"></span><textarea id="term-in" rows="1" spellcheck="false" autocomplete="off"
@@ -654,7 +661,7 @@ async function renderShell() {
   };
   const draw = () => {
     out.textContent = "";
-    if (!shellLog.length) append("PowerShell inside CloudTec. Try: Get-Date, Get-Service, or Import-Module ActiveDirectory\n\n", "term-dim");
+    if (!shellLog.length) append("PowerShell inside CloudTec. Pick a connection above and click Connect, then try Get-ADUser -Filter * or Get-VM.\n\n", "term-dim");
     for (const e of shellLog) {
       append(`PS ${e.cwd}> `, "term-prompt");
       append(e.command + "\n");
@@ -679,20 +686,32 @@ async function renderShell() {
       const command = input.value.trim();
       if (!command) return;
       shellHistory.push(command); hist = shellHistory.length;
-      input.value = ""; grow(); input.disabled = true;
-      append(`PS ${cwd}> `, "term-prompt"); append(command + "\n"); append("Running…\n", "term-dim");
-      term.scrollTop = term.scrollHeight;
-      const entry = { cwd, command };
-      try {
-        const r = await api("POST", "/api/shell/run", { command });
-        Object.assign(entry, { output: r.output, error: r.error });
-        cwd = r.cwd;
-      } catch (err) {
-        Object.assign(entry, { output: err.message, error: true });
-      }
-      shellLog.push(entry);
-      input.disabled = false; draw(); input.focus();
+      input.value = ""; grow();
+      await send(command, "/api/shell/run", { command });
     }
+  });
+
+  async function send(label, path, body) {
+    input.disabled = true;
+    const btn = $("#sh-connect"); if (btn) btn.disabled = true;
+    append(`PS ${cwd}> `, "term-prompt"); append(label + "\n"); append("Running…\n", "term-dim");
+    term.scrollTop = term.scrollHeight;
+    const entry = { cwd, command: label };
+    try {
+      const r = await api("POST", path, body);
+      Object.assign(entry, { output: r.output, error: r.error });
+      cwd = r.cwd;
+    } catch (err) {
+      Object.assign(entry, { output: err.message, error: true });
+    }
+    shellLog.push(entry);
+    input.disabled = false; if (btn) btn.disabled = false;
+    draw(); input.focus();
+  }
+
+  $("#sh-connect")?.addEventListener("click", () => {
+    const c = real.find((x) => x.id === $("#sh-conn").value);
+    send(`# Connect to ${c.name} with the credentials saved in CloudTec`, "/api/shell/connect", { connection_id: c.id });
   });
   term.addEventListener("click", () => { if (!window.getSelection().toString()) input.focus(); });
   $("#sh-clear").onclick = () => { shellLog.length = 0; draw(); input.focus(); };

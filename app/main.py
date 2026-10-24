@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from .auth import COOKIE, AdminPassword, PasswordError, Sessions
 from .config import Settings
 from .connectors import ConnectorError, open_connector
-from .shell import PowerShellSession, find_powershell
+from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 
 log = logging.getLogger("cloudtec")
@@ -38,6 +38,10 @@ class ChangePasswordBody(BaseModel):
 
 class ShellBody(BaseModel):
     command: str = Field(min_length=1, max_length=100_000)
+
+
+class ShellConnectBody(BaseModel):
+    connection_id: str
 
 
 class ConnectionBody(BaseModel):
@@ -279,6 +283,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/shell/run", dependencies=api)
     def shell_run(body: ShellBody, request: Request):
         return require_shell(request).run(body.command)
+
+    @app.post("/api/shell/connect", dependencies=api)
+    def shell_connect(body: ShellConnectBody, request: Request):
+        session = require_shell(request)
+        conn = store.get(body.connection_id)
+        if not conn:
+            raise HTTPException(404, "Connection not found")
+        if conn.demo:
+            raise HTTPException(422, f"{conn.name} is a demo connection, so there's no real server to connect to.")
+        return session.run(connect_script(conn), timeout=120, log_as=f"[connect] {conn.name} ({conn.kind})")
 
     @app.post("/api/shell/reset", dependencies=api)
     def shell_reset(request: Request):
