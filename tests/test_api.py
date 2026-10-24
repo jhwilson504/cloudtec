@@ -206,3 +206,13 @@ def test_ui_is_revalidated_so_updates_show(client):
     assert client.get("/").headers["cache-control"] == "no-cache"
     assert client.get("/static/app.js").headers["cache-control"] == "no-cache"
     assert "cache-control" not in client.get("/api/connections").headers
+
+
+def test_reset_password_can_unlock(client):
+    ad = add_demo(client, "ad", "Corp")
+    locked = next(u for u in client.get(f"/api/ad/{ad}/users").json() if u["locked"])
+    r = client.post(f"/api/ad/{ad}/users/reset-password",
+                    json={"dn": locked["dn"], "new_password": "N3w-Passw0rd!", "unlock": True, "must_change": True})
+    assert r.status_code == 200
+    after = {u["dn"]: u for u in client.get(f"/api/ad/{ad}/users").json()}[locked["dn"]]
+    assert after["locked"] is False

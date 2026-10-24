@@ -57,7 +57,9 @@ class DnBody(BaseModel):
 
 
 class PasswordBody(DnBody):
-    new_password: str = Field(min_length=8)
+    new_password: str = Field(min_length=8, max_length=256)
+    unlock: bool = False
+    must_change: bool = False
 
 
 class PowerBody(BaseModel):
@@ -338,7 +340,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/ad/{conn_id}/users/reset-password", dependencies=api)
     def ad_reset_password(conn_id: str, body: PasswordBody):
         with open_connector(get_conn(conn_id, "ad")) as c:
-            c.reset_password(body.dn, body.new_password)
+            c.reset_password(body.dn, body.new_password, unlock=body.unlock, must_change=body.must_change)
         return {"ok": True}
 
     # --- vSphere -----------------------------------------------------------

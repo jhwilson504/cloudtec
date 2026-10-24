@@ -141,8 +141,11 @@ class DemoAD:
     def unlock(self, dn: str) -> None:
         self._user(dn)["locked"] = False
 
-    def reset_password(self, dn: str, new_password: str) -> None:
-        self._user(dn)
+    def reset_password(self, dn: str, new_password: str, unlock: bool = False, must_change: bool = False) -> None:
+        user = self._user(dn)
+        if unlock:
+            user["locked"] = False
+        user["must_change"] = must_change
 
 
 def _vs_state(key: str) -> dict:

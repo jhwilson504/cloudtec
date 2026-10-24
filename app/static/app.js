@@ -168,7 +168,7 @@ async function renderDashboard() {
   if (!items.length) {
     view.innerHTML = `<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
       <p class="muted">Connect your Active Directory domains and vCenter servers to manage them from one place.</p></div></div>
-      <div class="grid">${noConnections("ad")}${noConnections("vsphere")}${powershellTile()}</div>`;
+      <div class="grid">${noConnections("ad")}${noConnections("vsphere")}${resetTile()}${powershellTile()}</div>`;
     return;
   }
   const ok = items.filter((i) => i.summary);
@@ -218,12 +218,22 @@ async function renderDashboard() {
       ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
       ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
     </div>
-    <div class="grid">${cards}${powershellTile()}</div>`;
+    <div class="grid">${cards}${resetTile()}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
     state[kind === "ad" ? "ad" : "vs"] = id;
   }));
+}
+
+const KEY_ICON = `<svg viewBox="0 0 24 24" width="56" height="56" aria-hidden="true"><rect width="24" height="24" rx="6" fill="var(--accent)"/>
+  <circle cx="9" cy="12" r="3.5" fill="none" stroke="#fff" stroke-width="2"/>
+  <path d="M12.5 12H19M17 12v2.5M19 12v2" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>`;
+
+function resetTile() {
+  return `<a class="card tool-tile" href="#/reset">${KEY_ICON}
+    <div><b>Reset password</b><div class="muted">Find a user and set a new password, unlock them, and make them change it at next sign-in.</div></div>
+  </a>`;
 }
 
 function powershellTile() {
@@ -303,10 +313,11 @@ function bindUserActions(root, users, reload, connId = () => state.ad) {
     const act = btn.dataset.act;
     try {
       if (act === "reset") {
-        const pw = await askPassword(u);
-        if (!pw) return;
-        await api("POST", `/api/ad/${cid}/users/reset-password`, { dn: u.dn, new_password: pw });
-        toast(`Password reset for ${u.display_name || u.username}`);
+        const opts = await askPassword(u);
+        if (!opts) return;
+        await api("POST", `/api/ad/${cid}/users/reset-password`, { dn: u.dn, ...opts });
+        toast(resetSummary(u, opts));
+        if (opts.unlock) reload();
         return;
       }
       if (act === "disable" && !(await confirmAction("Disable account", `Disable <b>${name}</b>? They will not be able to sign in.`, "Disable", true))) return;
@@ -317,22 +328,70 @@ function bindUserActions(root, users, reload, connId = () => state.ad) {
   });
 }
 
+function generatePassword(length = 16) {
+  // At least one of each kind, no look-alike characters (0/O, 1/l/I).
+  const sets = ["ABCDEFGHJKLMNPQRSTUVWXYZ", "abcdefghijkmnopqrstuvwxyz", "23456789", "!@#$%*-_=+?"];
+  const all = sets.join("");
+  const rand = (n) => crypto.getRandomValues(new Uint32Array(1))[0] % n;
+  const chars = sets.map((s) => s[rand(s.length)]);
+  while (chars.length < length) chars.push(all[rand(all.length)]);
+  for (let i = chars.length - 1; i > 0; i--) { const j = rand(i + 1); [chars[i], chars[j]] = [chars[j], chars[i]]; }
+  return chars.join("");
+}
+
+// The new-password fields and options, shared by the Reset password page and the pop-up.
+function passwordFields(user) {
+  return `<div class="row" style="align-items:flex-end">
+      <label style="flex:1;min-width:200px">New password <input type="password" name="pw1" minlength="8" required autocomplete="new-password"></label>
+      <button type="button" class="btn" data-gen>Generate</button></div>
+    <label>Confirm new password <input type="password" name="pw2" minlength="8" required autocomplete="new-password"></label>
+    <label class="inline"><input type="checkbox" name="show"> Show password</label>
+    <label class="inline"><input type="checkbox" name="unlock" ${user.locked ? "checked" : ""}> Unlock the account${user.locked ? " (it's locked now)" : ""}</label>
+    <label class="inline"><input type="checkbox" name="must_change" checked> User must change password at next sign-in</label>
+    <p class="error" data-err></p>`;
+}
+
+function bindPasswordFields(form) {
+  const show = (on) => { form.show.checked = on; form.pw1.type = form.pw2.type = on ? "text" : "password"; };
+  const clearError = () => { form.querySelector("[data-err]").textContent = ""; };
+  form.show.onchange = () => show(form.show.checked);
+  form.pw1.addEventListener("input", clearError);
+  form.pw2.addEventListener("input", clearError);
+  form.querySelector("[data-gen]").onclick = () => {
+    form.pw1.value = form.pw2.value = generatePassword();
+    clearError();
+    show(true);
+  };
+  return () => {
+    const err = form.querySelector("[data-err]");
+    err.textContent = "";
+    if (form.pw1.value !== form.pw2.value) { err.textContent = "The passwords don't match."; return null; }
+    return { new_password: form.pw1.value, unlock: form.unlock.checked, must_change: form.must_change.checked };
+  };
+}
+
+function resetSummary(user, opts) {
+  const name = user.display_name || user.username;
+  return [`Password reset for ${name}.`,
+    opts.unlock ? "The account is unlocked." : "",
+    opts.must_change ? "They'll be asked to choose their own password at next sign-in." : ""].filter(Boolean).join(" ");
+}
+
 function askPassword(user) {
   return new Promise((resolve) => {
     modal(`<h2>Reset password</h2><p>Set a new password for <b>${esc(user.display_name || user.username)}</b>.</p>
-      <form id="pw-form" style="display:grid;gap:12px">
-        <label>New password <input type="password" id="pw1" minlength="8" required autocomplete="new-password"></label>
-        <label>Confirm <input type="password" id="pw2" minlength="8" required autocomplete="new-password"></label>
-        <p class="error" id="pw-err"></p>
+      <form id="pw-form" style="display:grid;gap:12px">${passwordFields(user)}
         <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button>
         <button class="btn primary" type="submit">Reset password</button></div></form>`);
-    $("#pw1").focus();
-    $("#pw-form").onsubmit = (e) => {
+    const form = $("#pw-form");
+    const read = bindPasswordFields(form);
+    form.pw1.focus();
+    form.onsubmit = (e) => {
       e.preventDefault();
-      if ($("#pw1").value !== $("#pw2").value) { $("#pw-err").textContent = "Passwords don't match"; return; }
-      const pw = $("#pw1").value;
+      const opts = read();
+      if (!opts) return;
       closeModal();
-      resolve(pw);
+      resolve(opts);
     };
     $("#modal").querySelector("[data-close]").addEventListener("click", () => resolve(null));
   });
@@ -617,6 +676,90 @@ async function renderConnections() {
   }
 }
 
+// ---- Reset password --------------------------------------------------------
+
+async function renderReset() {
+  loading();
+  const conns = (await api("GET", "/api/connections")).filter((c) => c.kind === "ad");
+  const head = `<div class="page-head"><div class="row" style="gap:12px">${KEY_ICON.replace(/56/g, "40")}
+    <div><h1>Reset password</h1><p class="muted" style="margin:0">Find the user, then set their new password.</p></div></div></div>`;
+  if (!conns.length) { view.innerHTML = head + noConnections("ad"); return; }
+  if (!conns.some((c) => c.id === state.ad)) state.ad = conns[0].id;
+
+  view.innerHTML = `${head}
+    <div class="card"><h2>1. Find the user</h2>
+      <div class="toolbar" style="margin-bottom:0">${connectionPicker(conns, state.ad, "rp-conn")}
+        <input type="search" id="rp-q" placeholder="Name, username or email…" autocomplete="off"></div>
+      <div id="rp-results" style="margin-top:12px"></div></div>
+    <div class="card section hidden" id="rp-step2"></div>`;
+
+  const q = $("#rp-q"), results = $("#rp-results"), step2 = $("#rp-step2");
+  q.focus();
+
+  async function search() {
+    step2.classList.add("hidden");
+    const term = q.value.trim();
+    if (term.length < 2) { results.innerHTML = '<p class="muted" style="margin:0">Type at least 2 characters.</p>'; return; }
+    results.innerHTML = '<p class="muted" style="margin:0">Searching…</p>';
+    try {
+      const users = (await api("GET", `/api/ad/${state.ad}/users?q=${encodeURIComponent(term)}`)).slice(0, 25);
+      results.innerHTML = table(["Name", "Username", "Status", ""], users.map((u, i) => `<tr>
+        <td><b>${esc(u.display_name || u.username)}</b><div class="sub">${esc(u.email || "")}</div></td>
+        <td class="mono">${esc(u.username)}</td>
+        <td>${u.enabled ? '<span class="badge ok">Enabled</span>' : '<span class="badge plain">Disabled</span>'}
+            ${u.locked ? '<span class="badge warn">Locked</span>' : ""}</td>
+        <td class="actions"><button class="btn small primary" data-pick="${i}">Choose</button></td></tr>`),
+        "No users match. Try part of their name or username.");
+      results.querySelectorAll("[data-pick]").forEach((b) => b.onclick = () => choose(users[b.dataset.pick]));
+    } catch (err) {
+      results.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+    }
+  }
+
+  function choose(user) {
+    results.innerHTML = "";
+    step2.classList.remove("hidden");
+    step2.innerHTML = `<h2>2. New password for ${esc(user.display_name || user.username)}</h2>
+      <p class="muted" style="margin-top:-6px">${esc(user.username)}${user.email ? " · " + esc(user.email) : ""}
+        ${user.enabled ? "" : ' · <span class="badge plain">Disabled</span>'}${user.locked ? ' <span class="badge warn">Locked</span>' : ""}</p>
+      <form id="rp-form" style="display:grid;gap:12px;max-width:560px">${passwordFields(user)}
+        <div class="row"><button class="btn primary" type="submit">Reset password</button>
+          <button class="btn" type="button" id="rp-cancel">Choose someone else</button></div></form>
+      <div id="rp-done"></div>`;
+    const form = $("#rp-form");
+    const read = bindPasswordFields(form);
+    form.pw1.focus();
+    $("#rp-cancel").onclick = () => { step2.classList.add("hidden"); q.focus(); q.select(); search(); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const opts = read();
+      if (!opts) return;
+      const btn = form.querySelector("button[type=submit]");
+      btn.disabled = true;
+      try {
+        await api("POST", `/api/ad/${state.ad}/users/reset-password`, { dn: user.dn, ...opts });
+        form.classList.add("hidden");
+        $("#rp-done").innerHTML = `<div class="notice ok">${esc(resetSummary(user, opts))}</div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn" id="rp-copy">Copy the new password</button>
+            <button class="btn primary" id="rp-again">Reset another password</button></div>`;
+        $("#rp-copy").onclick = async () => {
+          try { await navigator.clipboard.writeText(opts.new_password); toast("Password copied"); }
+          catch { toast("Couldn't copy. Select the password field instead.", true); }
+        };
+        $("#rp-again").onclick = () => { q.value = ""; step2.classList.add("hidden"); search(); q.focus(); };
+      } catch (err) {
+        form.querySelector("[data-err]").textContent = err.message;
+        btn.disabled = false;
+      }
+    };
+  }
+
+  $("#rp-conn")?.addEventListener("change", (e) => { state.ad = e.target.value; search(); });
+  q.addEventListener("input", debounce(search));
+  search();
+}
+
 // ---- PowerShell ----------------------------------------------------------
 
 const shellLog = [];      // transcript, kept while you move between pages
@@ -770,6 +913,7 @@ const routes = {
   crosscheck: renderCrosscheck,
   connections: renderConnections,
   powershell: renderShell,
+  reset: renderReset,
   settings: renderSettings,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };

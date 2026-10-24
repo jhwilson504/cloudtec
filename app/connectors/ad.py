@@ -269,7 +269,7 @@ class ADConnector:
         except LDAPException as e:
             raise ConnectorError(f"Could not unlock account: {e}") from e
 
-    def reset_password(self, dn: str, new_password: str) -> None:
+    def reset_password(self, dn: str, new_password: str, unlock: bool = False, must_change: bool = False) -> None:
         self._require_dn(dn)
         if not self.use_ssl:
             raise ConnectorError("Active Directory only accepts password resets over LDAPS (use_ssl)")
@@ -277,3 +277,11 @@ class ADConnector:
             self._conn.extend.microsoft.modify_password(dn, new_password)
         except LDAPException as e:
             raise ConnectorError(f"Password reset rejected: {e}") from e
+        try:
+            if must_change:
+                # pwdLastSet = 0 makes Windows ask for a new password at the next sign-in.
+                self._conn.modify(dn, {"pwdLastSet": [(MODIFY_REPLACE, ["0"])]})
+            if unlock:
+                self._conn.extend.microsoft.unlock_account(dn)
+        except LDAPException as e:
+            raise ConnectorError(f"The password was reset, but a follow-up step failed: {e}") from e

@@ -107,3 +107,11 @@ def test_lockout_duration_parsing():
     assert _lockout_duration("0") is FOREVER
     assert _lockout_duration("-9223372036854775808") is FOREVER
     assert _lockout_duration(timedelta(minutes=-30)) == timedelta(minutes=30)
+
+
+def test_reset_password_with_unlock_and_must_change(ad):
+    ad.reset_password(ALICE, "N3w-Passw0rd!", unlock=True, must_change=True)
+    ad._conn.search(ALICE, "(objectClass=*)", search_scope="BASE", attributes=["pwdLastSet", "lockoutTime"])
+    attrs = ad._conn.response[0]["attributes"]
+    assert str(attrs["pwdLastSet"]) in ("0", "1601-01-01 00:00:00+00:00")
+    assert str(attrs["lockoutTime"]) in ("0", "1601-01-01 00:00:00+00:00")

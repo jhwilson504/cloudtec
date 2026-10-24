@@ -170,6 +170,7 @@ td .sub { color: var(--muted); font-size: 12px; }
 nav a { display: flex; align-items: center; }
 .tool-tile { display: flex; gap: 16px; align-items: center; color: var(--text); text-decoration: none; }
 .tool-tile:hover { border-color: var(--accent); }
+.tool-tile > img, .tool-tile > svg, .page-head svg { flex-shrink: 0; }
 .term {
   background: #012456; color: #eeedf0; border-radius: 12px; padding: 14px 16px;
   height: 62vh; min-height: 320px; overflow-y: auto; cursor: text;

@@ -4,6 +4,7 @@ One web console for your **Active Directory** domains and **VMware vSphere** (vC
 
 - **Dashboard**: users, lockouts, computers, VMs, hosts and storage across every connection at a glance.
 - **Active Directory**: browse and search users, groups and computers. Unlock accounts, enable or disable them, and reset passwords.
+- **Reset password**: a page (and dashboard tile) to find a user, set or generate a new password, unlock the account, and require a change at next sign-in.
 - **vSphere**: browse VMs, hosts, datastores and clusters. Power on, shut down or restart the guest, power off, and view VM details (guest OS, IP, disks, NICs).
 - **Cross-check**: lines up AD computer accounts with VMs by hostname, so you can see VMs that never joined the domain and computer accounts with no VM behind them.
 - **PowerShell**: a PowerShell window inside CloudTec (also on the dashboard). The session keeps variables, the current folder and loaded modules between commands, so you can `Import-Module ActiveDirectory` once and keep working.
