@@ -6,6 +6,7 @@ One web console for your **Active Directory** domains and **VMware vSphere** (vC
 - **Active Directory**: browse and search users, groups and computers. Unlock accounts, enable or disable them, and reset passwords.
 - **vSphere**: browse VMs, hosts, datastores and clusters. Power on, shut down or restart the guest, power off, and view VM details (guest OS, IP, disks, NICs).
 - **Cross-check**: lines up AD computer accounts with VMs by hostname, so you can see VMs that never joined the domain and computer accounts with no VM behind them.
+- **PowerShell**: a PowerShell window inside CloudTec (also on the dashboard). The session keeps variables, the current folder and loaded modules between commands, so you can `Import-Module ActiveDirectory` once and keep working.
 - **Global search**: one search box across every domain and vCenter, with actions available straight from the results.
 - **Demo mode**: add sample connections and try everything without a lab.
 
@@ -55,12 +56,22 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 | `CLOUDTEC_SECRET_KEY` | generated | Fernet key used to encrypt saved passwords. If unset, one is generated into `<data dir>/secret.key`. **Back this up**: without it, saved passwords can't be decrypted. |
 | `CLOUDTEC_SECURE_COOKIES` | `false` | Set to `true` when serving over HTTPS. |
 | `CLOUDTEC_SESSION_HOURS` | `8` | How long a sign-in lasts. |
+| `CLOUDTEC_SHELL` | `local` | The PowerShell page: `local` allows it only in a browser on the same computer (`localhost`), `on` allows it from anywhere, `off` disables it. |
+| `CLOUDTEC_POWERSHELL` | auto | Path to the PowerShell to use. By default `pwsh` (PowerShell 7) if installed, otherwise `powershell` (Windows PowerShell). |
 
 ## Admin password
 
 - **Change it** under **Settings** after you sign in. The new password is stored as a salted hash in `<data dir>/admin_password.hash`, and any other signed-in browsers are signed out.
 - **First start:** if `CLOUDTEC_ADMIN_PASSWORD` isn't set and no password has been saved yet, one is generated and written in plain text to `<data dir>/admin_password` so you can read it. It's replaced by the hash file the first time you change the password.
 - **Forgot it?** Stop CloudTec, delete `<data dir>/admin_password.hash`, put the password you want in `<data dir>/admin_password`, and start it again. Then change it under Settings so it's stored hashed.
+
+## PowerShell page
+
+Commands run on the computer CloudTec runs on, as the Windows user who started CloudTec, with that user's permissions. Anyone who can sign in to CloudTec can run them, so:
+
+- By default the page only works in a browser on the same computer. Leave `CLOUDTEC_SHELL` at `local` unless you really need remote access, and if you do, serve CloudTec over HTTPS.
+- Every command is recorded with a timestamp in `<data dir>/shell_history.log`.
+- Commands can't answer prompts (they run non-interactively), so add `-Force` or `-Confirm:$false` where needed. A command that runs longer than 5 minutes is stopped and the session restarts.
 
 ## Requirements on the other side
 

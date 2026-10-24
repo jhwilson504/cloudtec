@@ -2,6 +2,7 @@
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field
 from .auth import COOKIE, AdminPassword, PasswordError, Sessions
 from .config import Settings
 from .connectors import ConnectorError, open_connector
+from .shell import PowerShellSession, find_powershell
 from .store import Connection, Store, load_or_create_key
 
 log = logging.getLogger("cloudtec")
@@ -32,6 +34,10 @@ class LoginBody(BaseModel):
 class ChangePasswordBody(BaseModel):
     current_password: str
     new_password: str = Field(min_length=8, max_length=256)
+
+
+class ShellBody(BaseModel):
+    command: str = Field(min_length=1, max_length=100_000)
 
 
 class ConnectionBody(BaseModel):
@@ -68,8 +74,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     store = Store(settings.data_dir, load_or_create_key(settings.data_dir, settings.secret_key))
     admin = AdminPassword(settings.data_dir, settings.admin_password)
     sessions = Sessions(settings.session_hours * 3600)
+    exe = find_powershell(settings.powershell)
+    shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
 
-    app = FastAPI(title="CloudTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json")
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        if shell:
+            shell.close()
+
+    app = FastAPI(title="CloudTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json",
+                  lifespan=lifespan)
 
     @app.exception_handler(ConnectorError)
     def connector_error(_: Request, exc: ConnectorError):
@@ -233,6 +248,43 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             rows.append(m)
         rows.sort(key=lambda m: ({"vm_only": 0, "ad_only": 1, "matched": 2}[m["status"]], m["name"].lower()))
         return {"machines": rows, "errors": errors}
+
+    # --- PowerShell --------------------------------------------------------
+
+    def shell_status(request: Request) -> dict:
+        """Whether the PowerShell page may be used from this browser, and if not, why."""
+        local = request.client is not None and request.client.host in ("127.0.0.1", "::1", "localhost")
+        if settings.shell == "off":
+            reason = "The PowerShell page is turned off (CLOUDTEC_SHELL=off)."
+        elif settings.shell != "on" and not local:
+            reason = ("For safety, PowerShell only works when CloudTec is opened on the computer it runs on "
+                      "(http://localhost:8000). Set CLOUDTEC_SHELL=on to allow it from other computers.")
+        elif not shell:
+            reason = "PowerShell wasn't found on this computer."
+        else:
+            reason = None
+        return {"available": reason is None, "reason": reason,
+                "cwd": shell.cwd if shell else None, "executable": exe}
+
+    def require_shell(request: Request) -> PowerShellSession:
+        status = shell_status(request)
+        if not status["available"]:
+            raise HTTPException(403, status["reason"])
+        return shell
+
+    @app.get("/api/shell", dependencies=api)
+    def get_shell(request: Request):
+        return shell_status(request)
+
+    @app.post("/api/shell/run", dependencies=api)
+    def shell_run(body: ShellBody, request: Request):
+        return require_shell(request).run(body.command)
+
+    @app.post("/api/shell/reset", dependencies=api)
+    def shell_reset(request: Request):
+        session = require_shell(request)
+        session.reset()
+        return {"ok": True, "cwd": session.cwd}
 
     # --- Active Directory --------------------------------------------------
 

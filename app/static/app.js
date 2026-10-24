@@ -168,7 +168,7 @@ async function renderDashboard() {
   if (!items.length) {
     view.innerHTML = `<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
       <p class="muted">Connect your Active Directory domains and vCenter servers to manage them from one place.</p></div></div>
-      <div class="grid">${noConnections("ad")}${noConnections("vsphere")}</div>`;
+      <div class="grid">${noConnections("ad")}${noConnections("vsphere")}${powershellTile()}</div>`;
     return;
   }
   const ok = items.filter((i) => i.summary);
@@ -218,12 +218,19 @@ async function renderDashboard() {
       ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
       ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
     </div>
-    <div class="grid">${cards}</div>`;
+    <div class="grid">${cards}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
     state[kind === "ad" ? "ad" : "vs"] = id;
   }));
+}
+
+function powershellTile() {
+  return `<a class="card tool-tile" href="#/powershell">
+    <img src="/static/powershell.svg" alt="" width="56" height="56">
+    <div><b>PowerShell</b><div class="muted">Run PowerShell commands on this computer, right inside CloudTec.</div></div>
+  </a>`;
 }
 
 // ---- Active Directory ----------------------------------------------------
@@ -610,6 +617,94 @@ async function renderConnections() {
   }
 }
 
+// ---- PowerShell ----------------------------------------------------------
+
+const shellLog = [];      // transcript, kept while you move between pages
+const shellHistory = [];  // commands, for the up/down arrow keys
+
+async function renderShell() {
+  loading();
+  const s = await api("GET", "/api/shell");
+  const head = `<div class="page-head"><div class="row" style="gap:12px">
+      <img src="/static/powershell.svg" alt="" width="40" height="40">
+      <div><h1>PowerShell</h1><p class="muted" style="margin:0">Commands run on the computer CloudTec is running on, as the user who started it.</p></div>
+    </div>${s.available ? '<div class="row"><button class="btn" id="sh-clear">Clear screen</button><button class="btn" id="sh-reset">Restart session</button></div>' : ""}</div>`;
+  if (!s.available) {
+    view.innerHTML = `${head}<div class="notice">${esc(s.reason)}</div>`;
+    return;
+  }
+  let cwd = s.cwd;
+  view.innerHTML = `${head}
+    <div class="term" id="term">
+      <pre id="term-out"></pre>
+      <div class="term-input"><span id="term-prompt"></span><textarea id="term-in" rows="1" spellcheck="false" autocomplete="off"
+        aria-label="PowerShell command"></textarea></div>
+    </div>
+    <p class="muted small-note">Enter runs the command · Shift+Enter adds a new line · ↑ ↓ recall earlier commands.
+      Commands that ask questions can't be answered here, so add <code>-Force</code> or <code>-Confirm:$false</code>.
+      Commands stop after 5 minutes.</p>`;
+
+  const out = $("#term-out"), input = $("#term-in"), term = $("#term");
+  const prompt = () => { $("#term-prompt").textContent = `PS ${cwd}> `; };
+  const append = (text, cls) => {
+    const span = document.createElement("span");
+    if (cls) span.className = cls;
+    span.textContent = text;
+    out.appendChild(span);
+  };
+  const draw = () => {
+    out.textContent = "";
+    if (!shellLog.length) append("PowerShell inside CloudTec. Try: Get-Date, Get-Service, or Import-Module ActiveDirectory\n\n", "term-dim");
+    for (const e of shellLog) {
+      append(`PS ${e.cwd}> `, "term-prompt");
+      append(e.command + "\n");
+      if (e.output) append(e.output + "\n", e.error ? "term-err" : "");
+      append("\n");
+    }
+    prompt();
+    term.scrollTop = term.scrollHeight;
+  };
+  const grow = () => { input.style.height = "auto"; input.style.height = input.scrollHeight + "px"; };
+  let hist = shellHistory.length;
+
+  input.addEventListener("input", grow);
+  input.addEventListener("keydown", async (e) => {
+    const single = !input.value.includes("\n");
+    if (e.key === "ArrowUp" && single && hist > 0) {
+      e.preventDefault(); input.value = shellHistory[--hist]; grow();
+    } else if (e.key === "ArrowDown" && single && hist < shellHistory.length) {
+      e.preventDefault(); hist++; input.value = shellHistory[hist] ?? ""; grow();
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const command = input.value.trim();
+      if (!command) return;
+      shellHistory.push(command); hist = shellHistory.length;
+      input.value = ""; grow(); input.disabled = true;
+      append(`PS ${cwd}> `, "term-prompt"); append(command + "\n"); append("Running…\n", "term-dim");
+      term.scrollTop = term.scrollHeight;
+      const entry = { cwd, command };
+      try {
+        const r = await api("POST", "/api/shell/run", { command });
+        Object.assign(entry, { output: r.output, error: r.error });
+        cwd = r.cwd;
+      } catch (err) {
+        Object.assign(entry, { output: err.message, error: true });
+      }
+      shellLog.push(entry);
+      input.disabled = false; draw(); input.focus();
+    }
+  });
+  term.addEventListener("click", () => { if (!window.getSelection().toString()) input.focus(); });
+  $("#sh-clear").onclick = () => { shellLog.length = 0; draw(); input.focus(); };
+  $("#sh-reset").onclick = async () => {
+    if (!(await confirmAction("Restart session", "Start a fresh PowerShell session? Variables and loaded modules from this session are cleared.", "Restart"))) return;
+    cwd = (await api("POST", "/api/shell/reset")).cwd;
+    shellLog.length = 0; draw(); toast("PowerShell session restarted"); input.focus();
+  };
+  draw();
+  input.focus();
+}
+
 // ---- settings ------------------------------------------------------------
 
 async function renderSettings() {
@@ -655,6 +750,7 @@ const routes = {
   vsphere: renderVSphere,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
+  powershell: renderShell,
   settings: renderSettings,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };
