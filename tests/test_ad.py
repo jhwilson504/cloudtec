@@ -4,7 +4,9 @@ import pytest
 from ldap3 import MOCK_SYNC, OFFLINE_AD_2012_R2, Connection, Server
 
 from app.connectors import ConnectorError
-from app.connectors.ad import ADConnector, _contains
+from datetime import datetime, timedelta, timezone
+
+from app.connectors.ad import FOREVER, ADConnector, _contains, _lockout_duration
 
 BASE = "DC=corp,DC=example,DC=com"
 ALICE = f"CN=Alice Admin,OU=Staff,{BASE}"
@@ -19,11 +21,12 @@ def ad():
         "objectClass": ["top", "person", "user"], "objectCategory": "person",
         "sAMAccountName": "alice", "displayName": "Alice Admin", "mail": "alice@corp.example.com",
         "userAccountControl": 512, "lockoutTime": 133500000000000000,
-        "lastLogonTimestamp": 133500000000000000,
+        "msDS-User-Account-Control-Computed": 16, "lastLogonTimestamp": 133500000000000000,
     })
     conn.strategy.add_entry(f"CN=Bob,OU=Staff,{BASE}", {
         "objectClass": ["top", "person", "user"], "objectCategory": "person",
-        "sAMAccountName": "bob", "displayName": "Bob", "userAccountControl": 514, "lockoutTime": 0,
+        "sAMAccountName": "bob", "displayName": "Bob", "userAccountControl": 514,
+        "lockoutTime": 133500000000000000, "msDS-User-Account-Control-Computed": 0,
     })
     conn.strategy.add_entry(f"CN=SRV-WEB01,OU=Servers,{BASE}", {
         "objectClass": ["top", "computer"], "cn": "SRV-WEB01", "dNSHostName": "srv-web01.corp.example.com",
@@ -44,6 +47,7 @@ def test_users_and_search(ad):
     assert users["alice"]["enabled"] and users["alice"]["locked"]
     assert users["alice"]["last_logon"].startswith("2024")
     assert users["bob"]["enabled"] is False
+    assert users["bob"]["locked"] is False   # old lockout that has expired by itself
     assert [u["username"] for u in ad.users("ali")] == ["alice"]
 
 
@@ -76,3 +80,30 @@ def test_password_reset_needs_ldaps():
     plain = ADConnector({"host": "dc", "base_dn": BASE, "bind_user": "u", "use_ssl": False}, "pw")
     with pytest.raises(ConnectorError, match="LDAPS"):
         plain.reset_password(ALICE, "NewPassw0rd!")
+
+
+def _ticks(dt):
+    return int((dt - datetime(1601, 1, 1, tzinfo=timezone.utc)).total_seconds() * 10_000_000)
+
+
+@pytest.mark.parametrize("duration, locked_minutes_ago, expected", [
+    (-18_000_000_000, 5, True),             # 30-minute policy, locked 5 minutes ago
+    (-18_000_000_000, 120, False),          # 30-minute policy, locked 2 hours ago: expired
+    (0, 60 * 24 * 400, True),                # "until an admin unlocks": still locked
+    (None, 5, True),                        # policy unreadable: assume AD's 10-minute default
+    (None, 60, False),
+])
+def test_lockout_fallback_without_computed_attribute(ad, duration, locked_minutes_ago, expected):
+    """Older or restricted DCs may not return msDS-User-Account-Control-Computed."""
+    if duration is not None:
+        ad._conn.strategy.add_entry(BASE, {"objectClass": ["top", "domain"], "lockoutDuration": duration})
+    locked_at = datetime.now(timezone.utc) - timedelta(minutes=locked_minutes_ago)
+    assert ad._is_locked({"lockoutTime": str(_ticks(locked_at))}) is expected
+    assert ad._is_locked({"lockoutTime": "0"}) is False
+
+
+def test_lockout_duration_parsing():
+    assert _lockout_duration("-18000000000") == timedelta(minutes=30)
+    assert _lockout_duration("0") is FOREVER
+    assert _lockout_duration("-9223372036854775808") is FOREVER
+    assert _lockout_duration(timedelta(minutes=-30)) == timedelta(minutes=30)

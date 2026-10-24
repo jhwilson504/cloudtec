@@ -20,6 +20,9 @@ from ldap3.utils.conv import escape_filter_chars
 from .base import ConnectorError
 
 UAC_DISABLED = 0x2
+UF_LOCKOUT = 0x10  # in msDS-User-Account-Control-Computed: locked right now
+COMPUTED_UAC = "msDS-User-Account-Control-Computed"
+FOREVER = timedelta.max
 FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 SUMMARY_CAP = 5000
 
@@ -28,7 +31,7 @@ GROUP_FILTER = "(objectClass=group)"
 COMPUTER_FILTER = "(objectClass=computer)"
 
 USER_ATTRS = [
-    "sAMAccountName", "displayName", "mail", "userAccountControl", "lockoutTime",
+    "sAMAccountName", "displayName", "mail", "userAccountControl", "lockoutTime", COMPUTED_UAC,
     "lastLogonTimestamp", "whenCreated", "title", "department",
 ]
 GROUP_ATTRS = ["cn", "description", "groupType", "member"]
@@ -52,14 +55,31 @@ def _int(value) -> int:
         return 0
 
 
-def _filetime(value) -> str | None:
+def _filetime_dt(value) -> datetime | None:
     """AD stores timestamps as 100ns ticks since 1601 (or a datetime once decoded)."""
     if isinstance(value, datetime):
-        return None if value.year <= 1601 else value.isoformat()
+        return None if value.year <= 1601 else value
     ticks = _int(value)
     if ticks <= 0 or ticks >= 0x7FFFFFFFFFFFFFFF:
         return None
-    return (FILETIME_EPOCH + timedelta(microseconds=ticks // 10)).isoformat()
+    return FILETIME_EPOCH + timedelta(microseconds=ticks // 10)
+
+
+def _filetime(value) -> str | None:
+    dt = _filetime_dt(value)
+    return dt.isoformat() if dt else None
+
+
+def _lockout_duration(value) -> timedelta:
+    """The domain's lockoutDuration: negative 100ns ticks; 0 or the minimum value means
+    accounts stay locked until an admin unlocks them."""
+    if isinstance(value, timedelta):
+        td = abs(value)
+        return FOREVER if td == timedelta(0) or td > timedelta(days=36500) else td
+    ticks = abs(_int(value))
+    if ticks == 0 or ticks >= 0x7FFFFFFFFFFFFFFF:
+        return FOREVER
+    return timedelta(microseconds=ticks // 10)
 
 
 def _generalized_time(value) -> str | None:
@@ -90,6 +110,7 @@ class ADConnector:
         self.bind_user = config.get("bind_user", "").strip()
         self.password = secret
         self._conn: Connection | None = None
+        self._lockout_window: timedelta | None = None
         if not (self.host and self.base_dn and self.bind_user):
             raise ConnectorError("host, base_dn and bind_user are required")
 
@@ -129,6 +150,31 @@ class ADConnector:
         except LDAPException as e:
             raise ConnectorError(f"LDAP search failed: {e}") from e
 
+    def _domain_lockout_window(self) -> timedelta:
+        """How long a lockout lasts, from the domain's password policy (read once per connection)."""
+        if self._lockout_window is None:
+            domain_dn = ",".join(p for p in self.base_dn.split(",") if p.strip().lower().startswith("dc="))
+            try:
+                self._conn.search(domain_dn, "(objectClass=*)", search_scope=BASE, attributes=["lockoutDuration"])
+                entries = [r for r in self._conn.response if r.get("type") == "searchResEntry"]
+                value = _first(entries[0]["attributes"], "lockoutDuration") if entries else None
+            except LDAPException:
+                value = None
+            # Unknown policy: AD's default is 10 minutes (Windows Server 2016 and later).
+            self._lockout_window = _lockout_duration(value) if value is not None else timedelta(minutes=10)
+        return self._lockout_window
+
+    def _is_locked(self, attrs: dict) -> bool:
+        computed = _first(attrs, COMPUTED_UAC)
+        if computed not in (None, ""):
+            return bool(_int(computed) & UF_LOCKOUT)
+        # Fallback: lockoutTime stays set after a lockout expires on its own, so check its age.
+        locked_at = _filetime_dt(_first(attrs, "lockoutTime"))
+        if locked_at is None:
+            return False
+        window = self._domain_lockout_window()
+        return window is FOREVER or datetime.now(timezone.utc) - locked_at < window
+
     def _require_dn(self, dn: str) -> None:
         if not dn.lower().endswith(self.base_dn.lower()):
             raise ConnectorError("Object is outside the configured base DN")
@@ -140,13 +186,13 @@ class ADConnector:
         return {"ok": True, "message": f"Bound as {who or self.bind_user}"}
 
     def summary(self) -> dict:
-        users = self._search(USER_FILTER, ["userAccountControl", "lockoutTime"], SUMMARY_CAP)
+        users = self._search(USER_FILTER, ["userAccountControl", "lockoutTime", COMPUTED_UAC], SUMMARY_CAP)
         computers = self._search(COMPUTER_FILTER, ["cn"], SUMMARY_CAP)
         groups = self._search(GROUP_FILTER, ["cn"], SUMMARY_CAP)
         return {
             "users": len(users),
             "disabled": sum(1 for u in users if _int(_first(u, "userAccountControl")) & UAC_DISABLED),
-            "locked": sum(1 for u in users if _filetime(_first(u, "lockoutTime")) is not None),
+            "locked": sum(1 for u in users if self._is_locked(u)),
             "computers": len(computers),
             "groups": len(groups),
             "capped": any(len(x) >= SUMMARY_CAP for x in (users, computers, groups)),
@@ -165,7 +211,7 @@ class ADConnector:
                 "title": _first(u, "title"),
                 "department": _first(u, "department"),
                 "enabled": not (uac & UAC_DISABLED),
-                "locked": _filetime(_first(u, "lockoutTime")) is not None,
+                "locked": self._is_locked(u),
                 "last_logon": _filetime(_first(u, "lastLogonTimestamp")),
                 "created": _generalized_time(_first(u, "whenCreated")),
             })
