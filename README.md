@@ -73,6 +73,21 @@ By default CloudTec only answers on the PC it runs on (`http://localhost:8000`).
 
 The setup opens TCP **8443** in Windows Firewall (Domain and Private networks) and switches CloudTec to HTTPS on the network. Restart it with **Start CloudTec**; colleagues then open `https://<your PC's name>:8443`. In this mode sign-in cookies are marked Secure. The PowerShell page still only works in a browser on the CloudTec PC itself. To go back to "this PC only", run the setup again and choose **5**. You can also script it: `python -m app.tls --help`.
 
+### Renewing the certificate automatically
+
+If the certificate came from your company CA (option 1), CloudTec can renew it before it expires. `python -m app.renew --ca "<CA server>\<CA name>"` checks the certificate and, when it expires within 30 days, makes a new key and request for the same names, submits it with `certreq -submit`, and installs the issued certificate (the old one is kept as `data\tls\cert-previous.pem`). Restart CloudTec afterwards so it uses the new certificate.
+
+- `--dry-run` only says what it would do; nothing is written and certreq isn't run.
+- `--template` (default `WebServer`) picks the certificate template, `--days` the renewal window, `--force` renews now.
+- If your CA holds requests for a CA manager's approval, the request id is kept in `data\tls\renewal.json` and the next run picks the certificate up with `certreq -retrieve`.
+- Each run is noted in `data\tls\renewal.log`.
+
+To run it every day, add a scheduled task as the account CloudTec runs under (it must be allowed to enroll for the template):
+
+    schtasks /create /tn "CloudTec certificate renewal" /sc daily /st 07:00 /tr "cmd /c cd /d C:\CloudTec && python -m app.renew --ca \"ca01.corp.example.com\Corp Issuing CA\""
+
+Certificates from CloudTec's own CA (option 3) aren't renewed this way; issue a new one with `python -m app.tls own-ca`.
+
 CloudTec only runs while its window is open on that PC, so for a team a small always-on server or VM is a better home for it.
 
 ## Users and roles
