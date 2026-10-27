@@ -83,9 +83,11 @@ CloudTec only runs while its window is open on that PC, so for a team a small al
 
 ## Certificate expiry alerts
 
-CloudTec watches certificates and warns **30 days** and again **21 days** before each one expires, and once more if it does expire: a banner on everyone's dashboard, and an email when `CLOUDTEC_SMTP_HOST` is set.
+CloudTec watches certificates and warns **30 days** and again **21 days** before each one expires, and once more if it does expire: a banner on everyone's dashboard, and an email when `CLOUDTEC_SMTP_HOST` is set. CloudTec only alerts; it never installs or changes a certificate.
 
-It always watches its own HTTPS certificate. Admins add others under **Settings > Certificate expiry alerts**, one per line:
+The **Certificates** page in the sidebar is the certificate dashboard: how many are expired, inside 21 days, inside 30 days or fine, and every watched certificate sorted by days left, coloured red (expired or 21 days), amber (30 days) or green.
+
+It always watches its own HTTPS certificate. Admins add others at the bottom of the **Certificates** page, one per line:
 
 ```
 btcme1.btcbahamas.com      javaughn.davis@btcbahamas.com   # mail server

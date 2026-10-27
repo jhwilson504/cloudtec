@@ -234,7 +234,7 @@ async function renderDashboard() {
   if (!items.length) {
     view.innerHTML = `${banner}<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
       <p class="muted">Connect your Active Directory domains and vCenter servers to manage them from one place.</p></div></div>
-      <div class="grid">${noConnections("ad")}${noConnections("vsphere")}${resetTile()}${powershellTile()}</div>`;
+      <div class="grid">${certTile(certs)}${noConnections("ad")}${noConnections("vsphere")}${resetTile()}${powershellTile()}</div>`;
     return;
   }
   const ok = items.filter((i) => i.summary);
@@ -284,7 +284,7 @@ async function renderDashboard() {
       ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
       ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
     </div>
-    <div class="grid">${cards}${resetTile()}${powershellTile()}</div>`;
+    <div class="grid">${certTile(certs)}${cards}${resetTile()}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
@@ -310,14 +310,32 @@ function certWhen(c) {
 }
 
 function certBanner(certs) {
-  const list = certs?.alerts ?? [];
+  const list = [...(certs?.alerts ?? [])].sort((a, b) => a.days_left - b.days_left);
   if (!list.length) return "";
   const bad = list.some((c) => c.level !== "warning");
-  const more = isAdmin() ? ' <a class="link" href="#/settings">Certificate alerts</a>' : "";
+  const more = ' <a class="link" href="#/certificates">See all certificates</a>';
   return `<div class="notice ${bad ? "bad" : "warn"} cert-banner" role="alert">
     <b>${list.length === 1 ? "A certificate needs" : `${list.length} certificates need`} renewing.</b>${more}
     <ul>${list.map((c) => `<li><b>${esc(c.target)}</b> ${certWhen(c)}${c.owners?.length
       ? ` · owner ${c.owners.map(esc).join(", ")}` : ""}</li>`).join("")}</ul></div>`;
+}
+
+// The certificates card on the dashboard: counts, and the ones expiring soonest.
+function certTile(certs) {
+  if (!certs) return "";
+  const list = certs.certificates;
+  const n = (level) => list.filter((c) => c.level === level).length;
+  const bad = n("expired") + n("critical"), warn = n("warning");
+  const soonest = list.filter((c) => c.expires).sort((a, b) => a.days_left - b.days_left).slice(0, 4);
+  const badge = bad ? `<span class="badge bad">${bad} urgent</span>` : warn ? `<span class="badge warn">${warn} expiring</span>`
+    : list.length ? '<span class="badge ok">All OK</span>' : '<span class="badge plain">None yet</span>';
+  return `<div class="card conn-card"><div class="head">
+      <div><a class="link" href="#/certificates"><b>Certificates</b></a>
+        <div class="sub muted">${list.length} watched · alerts at ${certs.alert_days.join(" and ")} days</div></div>${badge}</div>
+    ${soonest.length ? `<dl>${soonest.map((c) => `<dt>${esc(c.target.split(/[\\/]/).pop())}</dt>
+        <dd><span class="days ${c.level}">${c.level === "expired" ? "expired" : `${c.days_left} days`}</span></dd>`).join("")}</dl>`
+      : `<p class="muted" style="margin:0">${isAdmin() ? '<a class="link" href="#/certificates">Add the certificates to watch</a>.' : "No certificates are being watched yet."}</p>`}
+  </div>`;
 }
 
 // One line per certificate in the settings box: "target  owner@example.com  # note".
@@ -335,42 +353,77 @@ function parseCertLines(text) {
   });
 }
 
-async function certCard() {
+const CERT_ORDER = { expired: 0, critical: 1, warning: 2, ok: 3, error: 4 };
+
+async function renderCertificates() {
+  loading();
   const c = await api("GET", "/api/certificates");
-  const rows = c.certificates.map((r) => `<tr><td><b>${esc(r.target)}</b>${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
-    <td>${certBadge(r)}</td><td>${r.error ? `<span class="muted">${esc(r.error)}</span>` : certWhen(r)}</td>
+  const list = [...c.certificates].sort((x, y) =>
+    (CERT_ORDER[x.level] - CERT_ORDER[y.level]) || ((x.days_left ?? 0) - (y.days_left ?? 0)));
+  const count = (level) => list.filter((r) => r.level === level).length;
+  const [warnDays, critDays] = c.alert_days;
+  const stat = (label, value, cls, sub) =>
+    `<div class="card stat cert-stat ${value ? cls : ""}"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+  const left = (r) => {
+    if (r.error) return `<span class="muted">${esc(r.error)}</span>`;
+    const pct = Math.max(0, Math.min(100, (r.days_left / 90) * 100));
+    return `<div class="days ${r.level}">${r.level === "expired" ? "Expired" : `${r.days_left} day${r.days_left === 1 ? "" : "s"}`}</div>
+      <div class="meter cert-meter ${r.level}"><div style="width:${r.level === "expired" ? 100 : pct.toFixed(1)}%"></div></div>`;
+  };
+  const rows = list.map((r) => `<tr class="cert-row cert-${r.level}">
+    <td><b>${esc(r.target)}</b>${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
+    <td>${certBadge(r)}</td><td>${left(r)}</td>
+    <td>${r.expires ? esc(new Date(r.expires).toLocaleDateString()) : ""}</td>
     <td>${esc(r.subject ?? "")}${r.issuer ? `<div class="muted">issued by ${esc(r.issuer)}</div>` : ""}</td>
     <td>${(r.owners ?? []).map(esc).join("<br>")}</td></tr>`);
-  return `<div class="card section" id="certs"><h2>Certificate expiry alerts</h2>
-    <p class="muted" style="margin-top:0">CloudTec warns ${c.alert_days.join(" and ")} days before a certificate expires:
-      on the dashboard, and by email ${c.email ? "to the addresses below" : "once a mail server is set up (<code>CLOUDTEC_SMTP_HOST</code>)"}.
-      ${c.checked ? `Last checked ${fmtDate(c.checked)}.` : ""}</p>
-    ${c.email_error ? `<div class="notice bad">${esc(c.email_error)}</div>` : ""}
-    ${table(["Certificate", "Status", "Expiry", "Subject", "Owners"], rows, "No certificates to watch yet. Add some below.")}
-    <form id="cert-form" class="form" style="margin-top:16px">
+
+  view.innerHTML = `<div class="page-head"><div><h1>Certificates</h1>
+      <p class="muted">Warnings ${warnDays} and ${critDays} days before each certificate expires.
+        ${c.checked ? `Last checked ${fmtDate(c.checked)}.` : ""}</p></div>
+      ${isAdmin() ? '<button class="btn" id="cert-check">Check now</button>' : ""}</div>
+    ${c.email_error ? `<div class="notice bad" style="margin-bottom:14px">${esc(c.email_error)}</div>` : ""}
+    <div class="stats">
+      ${stat("Expired", count("expired"), "bad", "renew now")}
+      ${stat(`Within ${critDays} days`, count("critical"), "bad", "second warning")}
+      ${stat(`Within ${warnDays} days`, count("warning"), "warn", "first warning")}
+      ${stat("OK", count("ok"), "ok", `more than ${warnDays} days left`)}
+      ${stat("Couldn't check", count("error"), "plain", "unreachable or unreadable")}
+    </div>
+    ${table(["Certificate", "Status", "Days left", "Expires", "Subject", "Owners"], rows,
+      isAdmin() ? "No certificates to watch yet. Add some below." : "No certificates are being watched yet.")}
+    ${c.config ? certForm(c) : ""}`;
+  wireCertPage(c);
+}
+
+function certForm(c) {
+  return `<div class="card section" id="certs"><h2>What to watch</h2>
+    <p class="muted" style="margin-top:0">Alerts show on this page and the dashboard${c.email
+      ? ", and are emailed to the addresses below."
+      : ". To get them by email too, set <code>CLOUDTEC_SMTP_HOST</code> to your mail server and restart CloudTec."}</p>
+    <form id="cert-form" class="form">
       <label class="full"><span>Certificates to watch, one per line: a host name or IP (add <code>:port</code> if not 443) or a
         certificate file path, then the owners' email addresses, then <code># a note</code></span>
-        <textarea name="targets" rows="6" spellcheck="false" placeholder="btcme1.btcbahamas.com  javaughn.davis@btcbahamas.com  # mail
+        <textarea name="targets" rows="8" spellcheck="false" placeholder="btcme1.btcbahamas.com  javaughn.davis@btcbahamas.com  # mail
 10.255.215.121  # OCS dashboard
 C:\\certs\\trailmail.cer">${esc(certLines(c.config.targets))}</textarea></label>
       <label class="full">Always email alerts to (comma-separated)
         <input name="email_to" value="${esc(c.config.email_to.join(", "))}" placeholder="sysops@example.com"></label>
       <div class="full" id="cert-msg"></div>
       <div class="full"><button class="btn primary" type="submit">Save and check</button>
-        <button class="btn" type="button" id="cert-check">Check now</button>
         ${c.email ? '<button class="btn" type="button" id="cert-test">Send test email</button>' : ""}</div>
     </form></div>`;
 }
 
-function wireCertCard() {
+function wireCertPage() {
+  const check = $("#cert-check");
+  if (check) check.onclick = async () => {
+    check.disabled = true;
+    try { await api("POST", "/api/certificates/check"); await renderCertificates(); toast("Checked."); }
+    catch (err) { toast(err.message, true); check.disabled = false; }
+  };
   const form = $("#cert-form");
   if (!form) return;
   const msg = (text, ok) => { $("#cert-msg").innerHTML = `<div class="notice ${ok ? "ok" : "bad"}">${esc(text)}</div>`; };
-  const redraw = async (note) => {
-    $("#certs").outerHTML = await certCard();
-    wireCertCard();
-    if (note) msg(note, true);
-  };
   form.onsubmit = async (e) => {
     e.preventDefault();
     try {
@@ -378,11 +431,9 @@ function wireCertCard() {
         targets: parseCertLines(form.targets.value),
         email_to: form.email_to.value.split(/[\s,;]+/).filter(Boolean),
       });
-      await redraw("Saved and checked.");
+      await renderCertificates();
+      toast("Saved and checked.");
     } catch (err) { msg(err.message, false); }
-  };
-  $("#cert-check").onclick = async () => {
-    try { await api("POST", "/api/certificates/check"); await redraw("Checked."); } catch (err) { msg(err.message, false); }
   };
   const test = $("#cert-test");
   if (test) test.onclick = async () => {
@@ -1247,8 +1298,7 @@ async function renderSettings() {
            double-click <b>Set up network access</b> in the CloudTec folder.</p>`}
     <p class="muted small-note">To change this, run <b>Set up network access</b> in the CloudTec folder, then restart CloudTec with <b>Start CloudTec</b>.</p></div>`;
   view.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
-    <div class="card"><h2>Your password</h2>${body}</div>${netCard}${net ? await certCard() : ""}`;
-  wireCertCard();
+    <div class="card"><h2>Your password</h2>${body}</div>${netCard}`;
 
   const form = $("#pw-change");
   if (!form) return;
@@ -1279,6 +1329,7 @@ const routes = {
   reset: renderReset,
   dcs: renderDCs,
   settings: renderSettings,
+  certificates: renderCertificates,
   users: renderUsers,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };
