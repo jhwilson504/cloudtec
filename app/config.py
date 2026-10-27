@@ -21,6 +21,13 @@ class Settings:
     session_hours: int
     shell: str = "local"
     powershell: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = 25
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    smtp_starttls: bool = False
+    alert_from: str | None = None
+    cert_check_hours: float = 12
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -32,4 +39,11 @@ class Settings:
             session_hours=int(os.environ.get("CLOUDTEC_SESSION_HOURS", "8")),
             shell=os.environ.get("CLOUDTEC_SHELL", "local").strip().lower(),
             powershell=os.environ.get("CLOUDTEC_POWERSHELL") or None,
+            smtp_host=os.environ.get("CLOUDTEC_SMTP_HOST") or None,
+            smtp_port=int(os.environ.get("CLOUDTEC_SMTP_PORT", "25")),
+            smtp_user=os.environ.get("CLOUDTEC_SMTP_USER") or None,
+            smtp_password=os.environ.get("CLOUDTEC_SMTP_PASSWORD") or None,
+            smtp_starttls=_flag("CLOUDTEC_SMTP_STARTTLS", False),
+            alert_from=os.environ.get("CLOUDTEC_ALERT_FROM") or None,
+            cert_check_hours=float(os.environ.get("CLOUDTEC_CERT_CHECK_HOURS", "12")),
         )
