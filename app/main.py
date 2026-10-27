@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import smtplib
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import certwatch
 from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
 from .connectors import ConnectorError, open_connector
@@ -77,6 +79,11 @@ class ConnectionBody(BaseModel):
     demo: bool = False
 
 
+class CertWatchBody(BaseModel):
+    targets: list[dict] = Field(default=[], max_length=500)
+    email_to: list[str] = Field(default=[], max_length=50)
+
+
 class DnBody(BaseModel):
     dn: str = Field(min_length=3)
 
@@ -133,10 +140,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     local_addresses = this_computer_addresses()
     exe = find_powershell(settings.powershell)
     shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
+    watcher = certwatch.Watcher(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        watcher.start()
         yield
+        watcher.stop()
         if shell:
             shell.close()
 
@@ -391,6 +401,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Connection not found")
         audit(request, "removed connection", conn.name, conn)
         return {"ok": True}
+
+    # --- certificate expiry ------------------------------------------------------
+
+    def certificates_out(request: Request, results: list[dict]) -> dict:
+        out = {"certificates": results, "alerts": certwatch.alerts(results), "checked": watcher.checked,
+               "alert_days": list(certwatch.ALERT_DAYS)}
+        if request.state.user["role"] == "admin":
+            config = certwatch.read_config(settings.data_dir)
+            out.update(config=config, email=certwatch.email_enabled(settings), email_error=watcher.last_error)
+        return out
+
+    @app.get("/api/certificates", dependencies=api)
+    def certificates(request: Request):
+        return certificates_out(request, watcher.latest())
+
+    @app.post("/api/certificates/check", dependencies=admin_only)
+    def certificates_check(request: Request):
+        return certificates_out(request, watcher.check())
+
+    @app.put("/api/certificates/config", dependencies=admin_only)
+    def certificates_config(body: CertWatchBody, request: Request):
+        try:
+            config = certwatch.save_config(settings.data_dir, body.targets, body.email_to)
+        except certwatch.WatchError as e:
+            raise HTTPException(400, str(e))
+        audit(request, "certificates.config", ", ".join(t["target"] for t in config["targets"]))
+        return certificates_out(request, watcher.check())
+
+    @app.post("/api/certificates/test-email", dependencies=admin_only)
+    def certificates_test_email(request: Request):
+        config = certwatch.read_config(settings.data_dir)
+        to = list(dict.fromkeys(config["email_to"] + [o for t in config["targets"] for o in t["owners"]]))
+        if not to:
+            raise HTTPException(400, "Add at least one email address to send alerts to.")
+        try:
+            certwatch.send_email(settings, to, "CloudTec test: certificate alerts",
+                                 "Certificate expiry alerts from CloudTec will arrive at this address.\n")
+        except (OSError, smtplib.SMTPException, certwatch.WatchError) as e:
+            raise HTTPException(502, f"Couldn't send the email: {e}")
+        audit(request, "certificates.test-email", ", ".join(to))
+        return {"sent_to": to}
 
     # --- overview ----------------------------------------------------------
 

@@ -229,9 +229,10 @@ $("#global-search").addEventListener("submit", (e) => {
 
 async function renderDashboard() {
   loading();
-  const items = await api("GET", "/api/dashboard");
+  const [items, certs] = await Promise.all([api("GET", "/api/dashboard"), api("GET", "/api/certificates").catch(() => null)]);
+  const banner = certBanner(certs);
   if (!items.length) {
-    view.innerHTML = `<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
+    view.innerHTML = `${banner}<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
       <p class="muted">Connect your Active Directory domains and vCenter servers to manage them from one place.</p></div></div>
       <div class="grid">${noConnections("ad")}${noConnections("vsphere")}${resetTile()}${powershellTile()}</div>`;
     return;
@@ -272,7 +273,7 @@ async function renderDashboard() {
       </div>${body}</div>`;
   }).join("");
 
-  view.innerHTML = `<div class="page-head"><div><h1>Dashboard</h1>
+  view.innerHTML = `${banner}<div class="page-head"><div><h1>Dashboard</h1>
       <p class="muted">${items.length} connection${items.length === 1 ? "" : "s"} · ${items.length - ok.length} with problems</p></div>
       <button class="btn" id="refresh">Refresh</button></div>
     <div class="stats">
@@ -289,6 +290,105 @@ async function renderDashboard() {
     const [kind, id] = a.dataset.pick.split(":");
     state[kind === "ad" ? "ad" : "vs"] = id;
   }));
+}
+
+// ---- certificate expiry --------------------------------------------------
+
+const CERT_LEVEL = { expired: ["bad", "Expired"], critical: ["bad", "Critical"], warning: ["warn", "Expiring"],
+  ok: ["ok", "OK"], error: ["plain", "Couldn't check"] };
+
+function certBadge(c) {
+  const [cls, label] = CERT_LEVEL[c.level] ?? ["plain", c.level];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function certWhen(c) {
+  if (!c.expires) return "";
+  const date = new Date(c.expires).toLocaleDateString();
+  if (c.level === "expired") return `expired ${esc(date)}`;
+  return `expires ${esc(date)} (${c.days_left} day${c.days_left === 1 ? "" : "s"})`;
+}
+
+function certBanner(certs) {
+  const list = certs?.alerts ?? [];
+  if (!list.length) return "";
+  const bad = list.some((c) => c.level !== "warning");
+  const more = isAdmin() ? ' <a class="link" href="#/settings">Certificate alerts</a>' : "";
+  return `<div class="notice ${bad ? "bad" : "warn"} cert-banner" role="alert">
+    <b>${list.length === 1 ? "A certificate needs" : `${list.length} certificates need`} renewing.</b>${more}
+    <ul>${list.map((c) => `<li><b>${esc(c.target)}</b> ${certWhen(c)}${c.owners?.length
+      ? ` · owner ${c.owners.map(esc).join(", ")}` : ""}</li>`).join("")}</ul></div>`;
+}
+
+// One line per certificate in the settings box: "target  owner@example.com  # note".
+function certLines(targets) {
+  return targets.map((t) => [/\s/.test(t.target) ? `"${t.target}"` : t.target, ...t.owners].join("  ") + (t.note ? `  # ${t.note}` : "")).join("\n");
+}
+
+function parseCertLines(text) {
+  return text.split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("#")).map((line) => {
+    const [main, ...note] = line.split("#");
+    // A quoted path may contain spaces.
+    const quoted = main.match(/^"([^"]+)"\s*(.*)$/);
+    const [target, ...rest] = quoted ? [quoted[1], ...quoted[2].split(/[\s,;]+/)] : main.trim().split(/[\s,;]+/);
+    return { target, owners: rest.filter(Boolean), note: note.join("#").trim() };
+  });
+}
+
+async function certCard() {
+  const c = await api("GET", "/api/certificates");
+  const rows = c.certificates.map((r) => `<tr><td><b>${esc(r.target)}</b>${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
+    <td>${certBadge(r)}</td><td>${r.error ? `<span class="muted">${esc(r.error)}</span>` : certWhen(r)}</td>
+    <td>${esc(r.subject ?? "")}${r.issuer ? `<div class="muted">issued by ${esc(r.issuer)}</div>` : ""}</td>
+    <td>${(r.owners ?? []).map(esc).join("<br>")}</td></tr>`);
+  return `<div class="card section" id="certs"><h2>Certificate expiry alerts</h2>
+    <p class="muted" style="margin-top:0">CloudTec warns ${c.alert_days.join(" and ")} days before a certificate expires:
+      on the dashboard, and by email ${c.email ? "to the addresses below" : "once a mail server is set up (<code>CLOUDTEC_SMTP_HOST</code>)"}.
+      ${c.checked ? `Last checked ${fmtDate(c.checked)}.` : ""}</p>
+    ${c.email_error ? `<div class="notice bad">${esc(c.email_error)}</div>` : ""}
+    ${table(["Certificate", "Status", "Expiry", "Subject", "Owners"], rows, "No certificates to watch yet. Add some below.")}
+    <form id="cert-form" class="form" style="margin-top:16px">
+      <label class="full"><span>Certificates to watch, one per line: a host name or IP (add <code>:port</code> if not 443) or a
+        certificate file path, then the owners' email addresses, then <code># a note</code></span>
+        <textarea name="targets" rows="6" spellcheck="false" placeholder="btcme1.btcbahamas.com  javaughn.davis@btcbahamas.com  # mail
+10.255.215.121  # OCS dashboard
+C:\\certs\\trailmail.cer">${esc(certLines(c.config.targets))}</textarea></label>
+      <label class="full">Always email alerts to (comma-separated)
+        <input name="email_to" value="${esc(c.config.email_to.join(", "))}" placeholder="sysops@example.com"></label>
+      <div class="full" id="cert-msg"></div>
+      <div class="full"><button class="btn primary" type="submit">Save and check</button>
+        <button class="btn" type="button" id="cert-check">Check now</button>
+        ${c.email ? '<button class="btn" type="button" id="cert-test">Send test email</button>' : ""}</div>
+    </form></div>`;
+}
+
+function wireCertCard() {
+  const form = $("#cert-form");
+  if (!form) return;
+  const msg = (text, ok) => { $("#cert-msg").innerHTML = `<div class="notice ${ok ? "ok" : "bad"}">${esc(text)}</div>`; };
+  const redraw = async (note) => {
+    $("#certs").outerHTML = await certCard();
+    wireCertCard();
+    if (note) msg(note, true);
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("PUT", "/api/certificates/config", {
+        targets: parseCertLines(form.targets.value),
+        email_to: form.email_to.value.split(/[\s,;]+/).filter(Boolean),
+      });
+      await redraw("Saved and checked.");
+    } catch (err) { msg(err.message, false); }
+  };
+  $("#cert-check").onclick = async () => {
+    try { await api("POST", "/api/certificates/check"); await redraw("Checked."); } catch (err) { msg(err.message, false); }
+  };
+  const test = $("#cert-test");
+  if (test) test.onclick = async () => {
+    try { const r = await api("POST", "/api/certificates/test-email"); msg(`Test email sent to ${r.sent_to.join(", ")}.`, true); }
+    catch (err) { msg(err.message, false); }
+  };
 }
 
 const KEY_ICON = `<svg viewBox="0 0 24 24" width="56" height="56" aria-hidden="true"><rect width="24" height="24" rx="6" fill="var(--accent)"/>
@@ -1147,7 +1247,8 @@ async function renderSettings() {
            double-click <b>Set up network access</b> in the CloudTec folder.</p>`}
     <p class="muted small-note">To change this, run <b>Set up network access</b> in the CloudTec folder, then restart CloudTec with <b>Start CloudTec</b>.</p></div>`;
   view.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
-    <div class="card"><h2>Your password</h2>${body}</div>${netCard}`;
+    <div class="card"><h2>Your password</h2>${body}</div>${netCard}${net ? await certCard() : ""}`;
+  wireCertCard();
 
   const form = $("#pw-change");
   if (!form) return;

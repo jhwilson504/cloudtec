@@ -60,6 +60,12 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 | `CLOUDTEC_SESSION_HOURS` | `8` | How long a sign-in lasts. |
 | `CLOUDTEC_SHELL` | `local` | The PowerShell page: `local` allows it only in a browser on the same computer (`localhost`), `on` allows it from anywhere, `off` disables it. |
 | `CLOUDTEC_POWERSHELL` | auto | Path to the PowerShell to use. By default `pwsh` (PowerShell 7) if installed, otherwise `powershell` (Windows PowerShell). |
+| `CLOUDTEC_SMTP_HOST` | unset | Mail server for certificate expiry emails. Without it, alerts only show on the dashboard. |
+| `CLOUDTEC_SMTP_PORT` | `25` | Mail server port. `465` uses SSL; with `587` also set `CLOUDTEC_SMTP_STARTTLS=true`. |
+| `CLOUDTEC_SMTP_STARTTLS` | `false` | Upgrade the mail connection with STARTTLS. |
+| `CLOUDTEC_SMTP_USER`, `CLOUDTEC_SMTP_PASSWORD` | unset | Sign in to the mail server, if it needs it. |
+| `CLOUDTEC_ALERT_FROM` | SMTP user | The From address of alert emails. |
+| `CLOUDTEC_CERT_CHECK_HOURS` | `12` | How often certificates are checked. `0` turns the background check off. |
 
 ## Letting colleagues use it (HTTPS on your network)
 
@@ -74,6 +80,25 @@ By default CloudTec only answers on the PC it runs on (`http://localhost:8000`).
 The setup opens TCP **8443** in Windows Firewall (Domain and Private networks) and switches CloudTec to HTTPS on the network. Restart it with **Start CloudTec**; colleagues then open `https://<your PC's name>:8443`. In this mode sign-in cookies are marked Secure. The PowerShell page still only works in a browser on the CloudTec PC itself. To go back to "this PC only", run the setup again and choose **5**. You can also script it: `python -m app.tls --help`.
 
 CloudTec only runs while its window is open on that PC, so for a team a small always-on server or VM is a better home for it.
+
+## Certificate expiry alerts
+
+CloudTec watches certificates and warns **30 days** and again **21 days** before each one expires, and once more if it does expire: a banner on everyone's dashboard, and an email when `CLOUDTEC_SMTP_HOST` is set.
+
+It always watches its own HTTPS certificate. Admins add others under **Settings > Certificate expiry alerts**, one per line:
+
+```
+btcme1.btcbahamas.com      javaughn.davis@btcbahamas.com   # mail server
+10.255.215.121             # OCS dashboard
+jfkvcs.btcbahamas.com:443  # vCenter
+"C:\certs\trail mail.cer"  owner@example.com
+```
+
+Each line is a host name or IP address (port 443 unless you add `:port`) or a certificate file (`.cer`, `.crt`, `.pem`, `.der`, `.p7b`), then the email addresses of whoever owns it, then an optional `# note`. CloudTec reads whatever certificate the address presents, even untrusted or expired ones, so internal servers and ESXi hosts work too. For a site behind a proxy such as Cloudflare, that's the proxy's certificate; to watch the origin's, add the origin's address.
+
+Every alert email goes to the **Always email alerts to** addresses plus that certificate's owners, once per stage (30 days, 21 days, expired). A renewed certificate starts over. The list is saved in `<data dir>/cert_watch.json`, and what has been emailed in `cert_alerts.json`.
+
+To check from the command line, or from Task Scheduler when CloudTec isn't running: `python -m app.certwatch [--email]`. It exits with code 2 when a certificate needs attention.
 
 ## Users and roles
 
