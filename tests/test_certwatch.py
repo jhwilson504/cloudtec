@@ -158,6 +158,93 @@ def _tls_server(tmp_path, days):
     return sock, cert
 
 
+@pytest.fixture(autouse=True)
+def no_proxy(monkeypatch):
+    """Tests reach their local servers directly, whatever proxy the test machine has."""
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "off")
+
+
+def _connect_proxy(log):
+    """A minimal HTTP CONNECT proxy, like a company web proxy."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+
+    def pipe(a, b):
+        try:
+            while data := a.recv(65536):
+                b.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for s in (a, b):
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def serve():
+        while True:
+            try:
+                client, _ = sock.accept()
+            except OSError:
+                return
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += client.recv(4096)
+            line = request.split(b"\r\n", 1)[0].decode()
+            log.append(line)
+            host, port = line.split()[1].rsplit(":", 1)
+            if host == "blocked.example.com":
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                client.close()
+                continue
+            upstream = socket.create_connection(("127.0.0.1", int(port)))
+            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
+            threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return sock
+
+
+def test_host_target_through_proxy(tmp_path, monkeypatch):
+    server, cert = _tls_server(tmp_path, days=25)
+    log = []
+    proxy = _connect_proxy(log)
+    try:
+        port = server.getsockname()[1]
+        monkeypatch.setenv("CLOUDTEC_CERT_PROXY", f"127.0.0.1:{proxy.getsockname()[1]}")
+        # The proxy resolves the name, as a company proxy does for internet sites.
+        r = certwatch.check_target(certwatch.clean_target(f"btcme1.example.com:{port}"), timeout=3)
+        assert r["error"] is None and r["level"] == "warning" and r["days_left"] == 24
+        assert log == [f"CONNECT btcme1.example.com:{port} HTTP/1.1"]
+
+        # A refusal from the proxy is reported along with the direct attempt.
+        r = certwatch.check_target(certwatch.clean_target("blocked.example.com"), timeout=3)
+        assert r["level"] == "error" and "via proxy" in r["error"] and "403" in r["error"] and "direct" in r["error"]
+    finally:
+        proxy.close()
+        server.close()
+
+
+def test_proxy_settings(monkeypatch):
+    for name in ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "proxy.corp:3128")
+    assert certwatch.proxy_for("btcbahamas.com") == ("proxy.corp", 3128)
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "http://proxy.corp")
+    assert certwatch.proxy_for("btcbahamas.com") == ("proxy.corp", 8080)
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "off")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp:80")
+    assert certwatch.proxy_for("btcbahamas.com") is None
+    monkeypatch.delenv("CLOUDTEC_CERT_PROXY")
+    monkeypatch.setenv("NO_PROXY", "10.0.0.1,.internal.example")
+    assert certwatch.proxy_for("btcbahamas.com") == ("proxy.corp", 80)
+    assert certwatch.proxy_for("10.0.0.1") is None
+    assert certwatch.proxy_for("host.internal.example") is None
+
+
 def test_host_target_reads_untrusted_certificate(tmp_path):
     sock, cert = _tls_server(tmp_path, days=10)
     try:

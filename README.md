@@ -65,6 +65,7 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 | `CLOUDTEC_SMTP_STARTTLS` | `false` | Upgrade the mail connection with STARTTLS. |
 | `CLOUDTEC_SMTP_USER`, `CLOUDTEC_SMTP_PASSWORD` | unset | Sign in to the mail server, if it needs it. |
 | `CLOUDTEC_ALERT_FROM` | SMTP user | The From address of alert emails. |
+| `CLOUDTEC_CERT_PROXY` | auto | Web proxy for certificate checks, as `host:port`, or `off`. By default CloudTec uses `HTTPS_PROXY` or the proxy set in Windows Internet Options, then tries directly. Set this if your PC gets its proxy from an automatic configuration script. |
 | `CLOUDTEC_CERT_CHECK_HOURS` | `12` | How often certificates are checked. `0` turns the background check off. |
 
 ## Letting colleagues use it (HTTPS on your network)

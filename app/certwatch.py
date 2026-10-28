@@ -30,6 +30,8 @@ import socket
 import ssl
 import sys
 import threading
+import urllib.parse
+import urllib.request
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -151,15 +153,64 @@ def save_config(data_dir: Path, targets: list, email_to: list[str]) -> dict:
 
 # --- reading certificates --------------------------------------------------------
 
-def fetch_host_cert(host: str, port: int = 443, timeout: float = 5) -> x509.Certificate:
-    """The certificate a server presents, even if it has expired or isn't trusted here."""
+def proxy_for(host: str) -> tuple[str, int] | None:
+    """The HTTPS proxy to reach a host through, if this PC uses one.
+
+    CLOUDTEC_CERT_PROXY (host:port, or "off") wins; otherwise HTTPS_PROXY or, on Windows, the
+    proxy set in Internet Options, skipping the hosts listed there as bypassed.
+    """
+    setting = os.environ.get("CLOUDTEC_CERT_PROXY", "").strip()
+    if setting.lower() in ("off", "none", "direct"):
+        return None
+    if not setting:
+        if urllib.request.proxy_bypass(host):
+            return None
+        setting = urllib.request.getproxies().get("https", "")
+    if not setting:
+        return None
+    url = urllib.parse.urlsplit(setting if "://" in setting else f"http://{setting}")
+    return (url.hostname, url.port or 8080) if url.hostname else None
+
+
+def _tunnel(proxy: tuple[str, int], host: str, port: int, timeout: float) -> socket.socket:
+    sock = socket.create_connection(proxy, timeout=timeout)
+    try:
+        sock.sendall(f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode())
+        reply = b""
+        while b"\r\n\r\n" not in reply:
+            chunk = sock.recv(4096)
+            if not chunk or len(reply) > 65536:
+                raise OSError(f"proxy {proxy[0]}:{proxy[1]} closed the connection")
+            reply += chunk
+        status = reply.split(b"\r\n", 1)[0].decode(errors="replace")
+        if status.split()[1:2] != ["200"]:
+            raise OSError(f"proxy {proxy[0]}:{proxy[1]} refused: {status}")
+        return sock
+    except BaseException:
+        sock.close()
+        raise
+
+
+def fetch_host_cert(host: str, port: int = 443, timeout: float = 10) -> x509.Certificate:
+    """The certificate a server presents, even if it has expired or isn't trusted here.
+
+    Goes through this PC's proxy when it has one (as a browser would), then tries directly.
+    """
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
-    with socket.create_connection((host, port), timeout=timeout) as sock:
-        with ctx.wrap_socket(sock, server_hostname=host) as tls_sock:
-            der = tls_sock.getpeercert(binary_form=True)
-    return x509.load_der_x509_certificate(der)
+    proxy = proxy_for(host)
+    routes = ([("via proxy", lambda: _tunnel(proxy, host, port, timeout))] if proxy else []) + \
+             [("direct", lambda: socket.create_connection((host, port), timeout=timeout))]
+    errors = []
+    for name, connect in routes:
+        try:
+            with connect() as sock, ctx.wrap_socket(sock, server_hostname=host) as tls_sock:
+                der = tls_sock.getpeercert(binary_form=True)
+            return x509.load_der_x509_certificate(der)
+        except (OSError, ssl.SSLError) as e:
+            errors.append(f"{name}: {e or e.__class__.__name__}" if proxy else str(e) or e.__class__.__name__)
+    raise OSError("; ".join(errors))
 
 
 def _describe(cert: x509.Certificate, now: dt.datetime) -> dict:
@@ -169,7 +220,7 @@ def _describe(cert: x509.Certificate, now: dt.datetime) -> dict:
             **alert_level(cert.not_valid_after_utc, now)}
 
 
-def check_target(entry: dict, now: dt.datetime | None = None, timeout: float = 5) -> dict:
+def check_target(entry: dict, now: dt.datetime | None = None, timeout: float = 10) -> dict:
     now = _now(now)
     target = entry["target"]
     out = {**entry, "source": "file" if is_file_target(target) else "host", "error": None}
@@ -187,7 +238,7 @@ def check_target(entry: dict, now: dt.datetime | None = None, timeout: float = 5
         return {**out, "level": "error", "error": str(e)}
 
 
-def check_all(data_dir: Path, now: dt.datetime | None = None, timeout: float = 5) -> list[dict]:
+def check_all(data_dir: Path, now: dt.datetime | None = None, timeout: float = 10) -> list[dict]:
     """CloudTec's own certificate first, then every configured target."""
     now = _now(now)
     results = []
