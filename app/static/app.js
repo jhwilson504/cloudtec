@@ -325,15 +325,19 @@ function certTile(certs) {
   if (!certs) return "";
   const list = certs.certificates;
   const n = (level) => list.filter((c) => c.level === level).length;
-  const bad = n("expired") + n("critical"), warn = n("warning");
-  const soonest = list.filter((c) => c.expires).sort((a, b) => a.days_left - b.days_left).slice(0, 4);
+  const bad = n("expired") + n("critical"), warn = n("warning"), failed = n("error");
+  // Expiring soonest first, then any that couldn't be checked: those are unknowns, not OK.
+  const soonest = [...list.filter((c) => c.expires).sort((a, b) => a.days_left - b.days_left),
+    ...list.filter((c) => c.level === "error")].slice(0, 4);
   const badge = bad ? `<span class="badge bad">${bad} urgent</span>` : warn ? `<span class="badge warn">${warn} expiring</span>`
+    : failed ? `<span class="badge plain">${failed} couldn't check</span>`
     : list.length ? '<span class="badge ok">All OK</span>' : '<span class="badge plain">None yet</span>';
   return `<div class="card conn-card"><div class="head">
       <div><a class="link" href="#/certificates"><b>Certificates</b></a>
         <div class="sub muted">${list.length} watched · alerts at ${certs.alert_days.join(" and ")} days</div></div>${badge}</div>
     ${soonest.length ? `<dl>${soonest.map((c) => `<dt>${esc(c.target.split(/[\\/]/).pop())}</dt>
-        <dd><span class="days ${c.level}">${c.level === "expired" ? "expired" : `${c.days_left} days`}</span></dd>`).join("")}</dl>`
+        <dd>${c.level === "error" ? `<span class="muted" title="${esc(c.error)}">couldn't check</span>`
+          : `<span class="days ${c.level}">${c.level === "expired" ? "expired" : `${c.days_left} days`}</span>`}</dd>`).join("")}</dl>`
       : `<p class="muted" style="margin:0">${isAdmin() ? '<a class="link" href="#/certificates">Add the certificates to watch</a>.' : "No certificates are being watched yet."}</p>`}
   </div>`;
 }
