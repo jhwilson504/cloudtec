@@ -7,7 +7,7 @@ title CloudTec Center
 cd /d "%~dp0"
 
 rem Already running? Stop it (only if it really is CloudTec), so this always starts the version in this folder.
-powershell -NoProfile -Command "$ports = @(8000); try { $n = Get-Content 'data\network.json' -Raw | ConvertFrom-Json; if ($n.port) { $ports += [int]$n.port } } catch {}; $ids = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($i in $ids) { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $i); if ($p.CommandLine -match 'app\.(run|main)') { Write-Host 'CloudTec is already running. Restarting it so you get the latest version...'; Stop-Process -Id $i -Force; Start-Sleep 2 } }"
+powershell -NoProfile -Command "$ports = @(8000); try { $n = Get-Content 'data\network.json' -Raw -ErrorAction Stop | ConvertFrom-Json; if ($n.port) { $ports += [int]$n.port } } catch {}; $ids = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($i in $ids) { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $i); if ($p.CommandLine -match 'app\.(run|main)') { Write-Host 'CloudTec is already running. Restarting it so you get the latest version...'; Stop-Process -Id $i -Force; Start-Sleep 2 } }"
 
 call :find_python || exit /b 1
 
