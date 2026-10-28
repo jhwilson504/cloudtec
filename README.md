@@ -65,6 +65,7 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 | `CLOUDTEC_SMTP_STARTTLS` | `false` | Upgrade the mail connection with STARTTLS. |
 | `CLOUDTEC_SMTP_USER`, `CLOUDTEC_SMTP_PASSWORD` | unset | Sign in to the mail server, if it needs it. |
 | `CLOUDTEC_ALERT_FROM` | SMTP user | The From address of alert emails. |
+| `CLOUDTEC_CERT_PROXY` | auto | Web proxy for certificate checks, as `host:port`, or `off`. By default CloudTec uses `HTTPS_PROXY` or the proxy set in Windows Internet Options, then tries directly. Set this if your PC gets its proxy from an automatic configuration script. |
 | `CLOUDTEC_CERT_CHECK_HOURS` | `12` | How often certificates are checked. `0` turns the background check off. |
 
 ## Letting colleagues use it (HTTPS on your network)
@@ -97,6 +98,8 @@ jfkvcs.btcbahamas.com:443  # vCenter
 ```
 
 Each line is a host name or IP address (port 443 unless you add `:port`) or a certificate file (`.cer`, `.crt`, `.pem`, `.der`, `.p7b`), then the email addresses of whoever owns it, then an optional `# note`. CloudTec reads whatever certificate the address presents, even untrusted or expired ones, so internal servers and ESXi hosts work too. For a site behind a proxy such as Cloudflare, that's the proxy's certificate; to watch the origin's, add the origin's address.
+
+**When a site can't be reached from your PC** (a firewall resets the connection, as happens to Cloudflare-fronted sites from some office networks), CloudTec looks a public name up in the public certificate logs at [crt.sh](https://crt.sh) instead. Every trusted certificate is logged when it's issued. A name can have several at once, for example Cloudflare's automatic edge certificate and a GoDaddy one on the origin. For each issuer only the newest counts, and CloudTec alerts on the issuer whose newest certificate expires first, which is the one nobody is renewing automatically. Start a line with `ct:` (`ct:btcme1.btcbahamas.com`) to always use the logs. Internal names and IP addresses aren't in the logs, so they need a direct connection or a certificate file.
 
 Every alert email goes to the **Always email alerts to** addresses plus that certificate's owners, once per stage (30 days, 21 days, expired). A renewed certificate starts over. The list is saved in `<data dir>/cert_watch.json`, and what has been emailed in `cert_alerts.json`.
 

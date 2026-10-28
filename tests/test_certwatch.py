@@ -158,6 +158,93 @@ def _tls_server(tmp_path, days):
     return sock, cert
 
 
+@pytest.fixture(autouse=True)
+def no_proxy(monkeypatch):
+    """Tests reach their local servers directly, whatever proxy the test machine has."""
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "off")
+
+
+def _connect_proxy(log):
+    """A minimal HTTP CONNECT proxy, like a company web proxy."""
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    sock.listen()
+
+    def pipe(a, b):
+        try:
+            while data := a.recv(65536):
+                b.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for s in (a, b):
+                try:
+                    s.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def serve():
+        while True:
+            try:
+                client, _ = sock.accept()
+            except OSError:
+                return
+            request = b""
+            while b"\r\n\r\n" not in request:
+                request += client.recv(4096)
+            line = request.split(b"\r\n", 1)[0].decode()
+            log.append(line)
+            host, port = line.split()[1].rsplit(":", 1)
+            if host == "blocked.example.com":
+                client.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                client.close()
+                continue
+            upstream = socket.create_connection(("127.0.0.1", int(port)))
+            client.sendall(b"HTTP/1.1 200 Connection established\r\n\r\n")
+            threading.Thread(target=pipe, args=(client, upstream), daemon=True).start()
+            threading.Thread(target=pipe, args=(upstream, client), daemon=True).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return sock
+
+
+def test_host_target_through_proxy(tmp_path, monkeypatch):
+    server, cert = _tls_server(tmp_path, days=25)
+    log = []
+    proxy = _connect_proxy(log)
+    try:
+        port = server.getsockname()[1]
+        monkeypatch.setenv("CLOUDTEC_CERT_PROXY", f"127.0.0.1:{proxy.getsockname()[1]}")
+        # The proxy resolves the name, as a company proxy does for internet sites.
+        r = certwatch.check_target(certwatch.clean_target(f"btcme1.example.com:{port}"), timeout=3)
+        assert r["error"] is None and r["level"] == "warning" and r["days_left"] == 24
+        assert log == [f"CONNECT btcme1.example.com:{port} HTTP/1.1"]
+
+        # A refusal from the proxy is reported along with the direct attempt.
+        r = certwatch.check_target(certwatch.clean_target("blocked.example.com"), timeout=3)
+        assert r["level"] == "error" and "via proxy" in r["error"] and "403" in r["error"] and "direct" in r["error"]
+    finally:
+        proxy.close()
+        server.close()
+
+
+def test_proxy_settings(monkeypatch):
+    for name in ("HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy", "HTTP_PROXY", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "proxy.corp:3128")
+    assert certwatch.proxy_for("btcbahamas.com") == ("proxy.corp", 3128)
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "http://proxy.corp")
+    assert certwatch.proxy_for("btcbahamas.com") == ("proxy.corp", 8080)
+    monkeypatch.setenv("CLOUDTEC_CERT_PROXY", "off")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp:80")
+    assert certwatch.proxy_for("btcbahamas.com") is None
+    monkeypatch.delenv("CLOUDTEC_CERT_PROXY")
+    monkeypatch.setenv("NO_PROXY", "10.0.0.1,.internal.example")
+    assert certwatch.proxy_for("btcbahamas.com") == ("proxy.corp", 80)
+    assert certwatch.proxy_for("10.0.0.1") is None
+    assert certwatch.proxy_for("host.internal.example") is None
+
+
 def test_host_target_reads_untrusted_certificate(tmp_path):
     sock, cert = _tls_server(tmp_path, days=10)
     try:
@@ -321,3 +408,96 @@ def test_command_line(tmp_path, capsys):
     tls.make_own_ca_cert(tmp_path, ["pc01"], ["127.0.0.1"], days=15)
     assert certwatch.main(["--data-dir", str(tmp_path)]) == 2
     assert "CloudTec (this server): expires" in capsys.readouterr().out
+
+
+# --- public certificate logs -----------------------------------------------------
+
+GOOGLE = "C=US, O=Google Trust Services, CN=WE1"
+GODADDY = ('C=US, ST=Arizona, L=Scottsdale, O="GoDaddy.com, Inc.", OU=http://certs.godaddy.com/repository/, '
+           "CN=Go Daddy Secure Certificate Authority - G2")
+
+# What crt.sh listed for btcme1.btcbahamas.com on 28 Oct 2026: Cloudflare's 90-day edge certificates
+# (Google Trust Services) and one GoDaddy certificate on the origin.
+CRTSH = {
+    "btcme1.btcbahamas.com": [
+        {"id": 29387057278, "serial_number": "a1", "issuer_name": GOOGLE, "common_name": "btcme1.btcbahamas.com",
+         "name_value": "btcme1.btcbahamas.com", "not_before": "2026-09-12T00:00:00", "not_after": "2026-12-11T00:00:00"},
+        {"id": 27966123403, "serial_number": "a2", "issuer_name": GOOGLE, "common_name": "btcme1.btcbahamas.com",
+         "name_value": "btcme1.btcbahamas.com", "not_before": "2026-07-15T00:00:00", "not_after": "2026-10-13T00:00:00"},
+        {"id": 26324174928, "serial_number": "gd1", "issuer_name": GODADDY, "common_name": "btcme1.btcbahamas.com",
+         "name_value": "btcme1.btcbahamas.com\nwww.btcme1.btcbahamas.com",
+         "not_before": "2026-05-13T00:00:00", "not_after": "2026-11-27T23:59:59"},
+        {"id": 1, "serial_number": "old", "issuer_name": "C=US, O=Old CA, CN=Old", "common_name": "btcme1.btcbahamas.com",
+         "name_value": "btcme1.btcbahamas.com", "not_before": "2024-01-01T00:00:00", "not_after": "2025-01-01T00:00:00"},
+    ],
+    "*.btcbahamas.com": [
+        {"id": 5, "serial_number": "w1", "issuer_name": GOOGLE, "common_name": "*.btcbahamas.com",
+         "name_value": "*.btcbahamas.com\nbtcbahamas.com", "not_before": "2026-10-01T00:00:00",
+         "not_after": "2026-12-30T00:00:00"},
+        {"id": 6, "serial_number": "x1", "issuer_name": GODADDY, "common_name": "other.btcbahamas.com",
+         "name_value": "other.btcbahamas.com", "not_before": "2026-01-01T00:00:00", "not_after": "2026-11-01T00:00:00"},
+    ],
+    "btcbahamas.com": [
+        {"id": 7, "serial_number": "b1", "issuer_name": GODADDY, "common_name": "btcbahamas.com",
+         "name_value": "btcbahamas.com\nwww.btcbahamas.com", "not_before": "2025-10-13T00:00:00",
+         "not_after": "2026-10-23T23:59:59"},
+        {"id": 8, "serial_number": "b2", "issuer_name": GODADDY, "common_name": "btcbahamas.com",
+         "name_value": "btcbahamas.com\nwww.btcbahamas.com", "not_before": "2026-10-13T00:00:00",
+         "not_after": "2027-04-29T23:59:59"},
+    ],
+}
+
+
+CT_NOW = dt.datetime(2026, 10, 28, 13, 0, tzinfo=dt.timezone.utc)   # when joey checked
+
+
+@pytest.fixture
+def crtsh(monkeypatch):
+    queries = []
+
+    def fake(query, timeout):
+        queries.append(query)
+        return CRTSH.get(query, [])
+
+    monkeypatch.setattr(certwatch, "_ct_entries", fake)
+    return queries
+
+
+def test_ct_reports_the_certificate_that_lapses_first(crtsh):
+    r = certwatch.ct_lookup("btcme1.btcbahamas.com", CT_NOW)
+    # Cloudflare's newest runs to 11 Dec, the GoDaddy one only to 27 Nov: that's the one to renew.
+    assert r["expires"].startswith("2026-11-27") and "GoDaddy" in r["issuer"]
+    assert r["level"] == "warning" and r["days_left"] == 30
+    assert r["fingerprint"] == "crtsh:gd1" and r["via"] == "certificate log"
+    # The wildcard for the parent domain is checked too; the unrelated name it returned is ignored.
+    assert crtsh == ["btcme1.btcbahamas.com", "*.btcbahamas.com"]
+
+
+def test_ct_ignores_replaced_and_retired_certificates(crtsh):
+    # The October GoDaddy certificate was replaced by the April 2027 one.
+    r = certwatch.ct_lookup("btcbahamas.com", NOW)
+    assert r["expires"].startswith("2027-04-29") and r["level"] == "ok"
+    with pytest.raises(certwatch.WatchError, match="No current certificate"):
+        certwatch.ct_lookup("nothing.example.com", NOW)
+
+
+def test_ct_target_and_fallback(crtsh, monkeypatch):
+    t = certwatch.clean_target("CT:BTCME1.btcbahamas.com")
+    assert t["target"] == "ct:btcme1.btcbahamas.com"
+    r = certwatch.check_target(t, CT_NOW)
+    assert r["source"] == "ct" and r["level"] == "warning"
+    for bad in ("ct:10.255.215.121", "ct:server01", "ct:host.local"):
+        with pytest.raises(certwatch.WatchError, match="public names"):
+            certwatch.clean_target(bad)
+
+    # When the server can't be reached (as from the BTC office), public names fall back to the logs.
+    def blocked(*a, **kw):
+        raise ConnectionResetError(10054, "An existing connection was forcibly closed by the remote host")
+
+    monkeypatch.setattr(certwatch, "fetch_host_cert", blocked)
+    r = certwatch.check_target(certwatch.clean_target("btcme1.btcbahamas.com"), CT_NOW)
+    assert r["source"] == "host" and r["via"] == "certificate log" and r["error"] is None
+    assert r["expires"].startswith("2026-11-27") and "forcibly closed" in r["direct_error"]
+    # Internal addresses aren't in the logs, so the connection error is reported.
+    r = certwatch.check_target(certwatch.clean_target("10.255.215.121"), NOW)
+    assert r["level"] == "error" and "forcibly closed" in r["error"]
