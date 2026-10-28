@@ -468,7 +468,7 @@ def test_ct_reports_the_certificate_that_lapses_first(crtsh):
     # Cloudflare's newest runs to 11 Dec, the GoDaddy one only to 27 Nov: that's the one to renew.
     assert r["expires"].startswith("2026-11-27") and "GoDaddy" in r["issuer"]
     assert r["level"] == "warning" and r["days_left"] == 30
-    assert r["fingerprint"] == "crtsh:gd1" and r["via"] == "certificate log"
+    assert r["fingerprint"] == "ct:gd1" and r["via"] == "certificate log" and r["ct_source"] == "crt.sh"
     # The wildcard for the parent domain is checked too; the unrelated name it returned is ignored.
     assert crtsh == ["btcme1.btcbahamas.com", "*.btcbahamas.com"]
 
@@ -501,3 +501,39 @@ def test_ct_target_and_fallback(crtsh, monkeypatch):
     # Internal addresses aren't in the logs, so the connection error is reported.
     r = certwatch.check_target(certwatch.clean_target("10.255.215.121"), NOW)
     assert r["level"] == "error" and "forcibly closed" in r["error"]
+
+
+def test_ct_falls_back_to_certspotter_when_crtsh_times_out(monkeypatch):
+    def slow(query, timeout):
+        raise TimeoutError("The read operation timed out")
+
+    monkeypatch.setattr(certwatch, "_ct_entries", slow)
+    issued = [  # what Cert Spotter returns: unexpired issuances only
+        {"id": "1", "cert_sha256": "cf", "dns_names": ["btcme1.btcbahamas.com"], "issuer": {"name": GOOGLE},
+         "not_after": "2026-12-11T00:00:00Z"},
+        {"id": "2", "cert_sha256": "gd", "dns_names": ["btcme1.btcbahamas.com", "www.btcme1.btcbahamas.com"],
+         "issuer": {"name": GODADDY}, "not_after": "2026-11-27T23:59:59Z"},
+    ]
+
+    class Resp:
+        def __init__(self, url):
+            self.url = url
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def read(self):
+            return json.dumps(issued).encode()
+
+    urls = []
+    monkeypatch.setattr(certwatch.urllib.request, "urlopen", lambda req, timeout: urls.append(req.full_url) or Resp(req.full_url))
+    r = certwatch.ct_lookup("btcme1.btcbahamas.com", CT_NOW)
+    assert r["ct_source"] == "Cert Spotter" and "GoDaddy" in r["issuer"] and r["days_left"] == 30
+    assert "domain=btcme1.btcbahamas.com" in urls[0] and "match_wildcards=true" in urls[0]
+
+    monkeypatch.setattr(certwatch, "_certspotter_entries", lambda name, timeout: (_ for _ in ()).throw(OSError("blocked")))
+    with pytest.raises(OSError, match="crt.sh: The read operation timed out; Cert Spotter: blocked"):
+        certwatch.ct_lookup("btcme1.btcbahamas.com", CT_NOW)

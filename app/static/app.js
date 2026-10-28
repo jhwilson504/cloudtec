@@ -375,7 +375,7 @@ async function renderCertificates() {
     <td>${certBadge(r)}</td><td>${left(r)}</td>
     <td>${r.expires ? esc(new Date(r.expires).toLocaleDateString()) : ""}${r.via
       ? `<div class="muted small-note" style="margin:0" title="${esc(r.direct_error ? `Couldn't connect: ${r.direct_error}` : "")}">from the
-          <a class="link" href="https://crt.sh/?id=${encodeURIComponent(r.ct_id ?? "")}" target="_blank" rel="noopener">certificate log</a></div>` : ""}</td>
+          <a class="link" href="https://crt.sh/?${r.ct_id ? `id=${encodeURIComponent(r.ct_id)}` : `q=${encodeURIComponent(r.target.replace(/^ct:/i, ""))}`}" target="_blank" rel="noopener">certificate log</a></div>` : ""}</td>
     <td>${esc(r.subject ?? "")}${r.issuer ? `<div class="muted">issued by ${esc(r.issuer)}</div>` : ""}</td>
     <td>${(r.owners ?? []).map(esc).join("<br>")}</td></tr>`);
 
