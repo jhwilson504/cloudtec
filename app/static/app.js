@@ -373,7 +373,9 @@ async function renderCertificates() {
   const rows = list.map((r) => `<tr class="cert-row cert-${r.level}">
     <td><b>${esc(r.target)}</b>${r.note ? `<div class="muted">${esc(r.note)}</div>` : ""}</td>
     <td>${certBadge(r)}</td><td>${left(r)}</td>
-    <td>${r.expires ? esc(new Date(r.expires).toLocaleDateString()) : ""}</td>
+    <td>${r.expires ? esc(new Date(r.expires).toLocaleDateString()) : ""}${r.via
+      ? `<div class="muted small-note" style="margin:0" title="${esc(r.direct_error ? `Couldn't connect: ${r.direct_error}` : "")}">from the
+          <a class="link" href="https://crt.sh/?id=${encodeURIComponent(r.ct_id ?? "")}" target="_blank" rel="noopener">certificate log</a></div>` : ""}</td>
     <td>${esc(r.subject ?? "")}${r.issuer ? `<div class="muted">issued by ${esc(r.issuer)}</div>` : ""}</td>
     <td>${(r.owners ?? []).map(esc).join("<br>")}</td></tr>`);
 
@@ -402,7 +404,8 @@ function certForm(c) {
       : ". To get them by email too, set <code>CLOUDTEC_SMTP_HOST</code> to your mail server and restart CloudTec."}</p>
     <form id="cert-form" class="form">
       <label class="full"><span>Certificates to watch, one per line: a host name or IP (add <code>:port</code> if not 443) or a
-        certificate file path, then the owners' email addresses, then <code># a note</code></span>
+        certificate file path, then the owners' email addresses, then <code># a note</code>.
+        Public names CloudTec can't connect to are looked up in the public certificate logs; start a line with <code>ct:</code> to always do that.</span>
         <textarea name="targets" rows="8" spellcheck="false" placeholder="btcme1.btcbahamas.com  javaughn.davis@btcbahamas.com  # mail
 10.255.215.121  # OCS dashboard
 C:\\certs\\trailmail.cer">${esc(certLines(c.config.targets))}</textarea></label>

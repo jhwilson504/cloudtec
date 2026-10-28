@@ -23,8 +23,10 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as dt
+import ipaddress
 import json
 import os
+import re
 import smtplib
 import socket
 import ssl
@@ -45,6 +47,9 @@ ALERT_DAYS = (30, 21)            # alert stages, in days before expiry
 RENEW_DAYS = ALERT_DAYS[0]       # the first alert: time to renew
 CONFIG, STATE = "cert_watch.json", "cert_alerts.json"
 CERT_EXTENSIONS = (".pem", ".cer", ".crt", ".der", ".p7b")
+CT_PREFIX = "ct:"                # look a name up in the public certificate logs instead of connecting
+CT_URL = "https://crt.sh/"
+CT_RETIRED_DAYS = 30             # an issuer whose newest certificate expired longer ago than this is no longer used
 
 
 class WatchError(Exception):
@@ -118,7 +123,12 @@ def clean_target(entry: dict | str) -> dict:
     target = str(entry.get("target", "")).strip().strip('"')
     if not target:
         raise WatchError("Each certificate to watch needs a host name, address or file path.")
-    if not is_file_target(target):
+    if target.lower().startswith(CT_PREFIX):
+        name = target[len(CT_PREFIX):].strip().lower()
+        if not _is_public_name(name):
+            raise WatchError(f"'{target}': certificate logs only cover public names like www.example.com.")
+        target = CT_PREFIX + name
+    elif not is_file_target(target):
         try:
             host, port = split_host(target)
         except ValueError:
@@ -213,6 +223,66 @@ def fetch_host_cert(host: str, port: int = 443, timeout: float = 10) -> x509.Cer
     raise OSError("; ".join(errors))
 
 
+# --- public certificate logs ----------------------------------------------------------
+
+def _is_public_name(name: str) -> bool:
+    if "." not in name or name.endswith((".local", ".lan", ".internal", ".corp")):
+        return False
+    try:
+        ipaddress.ip_address(name)
+        return False
+    except ValueError:
+        return True
+
+
+def _issuer_org(issuer: str) -> str:
+    m = re.search(r"O=(\"[^\"]*\"|[^,]+)", issuer)
+    return (m.group(1).strip('"') if m else issuer).strip()
+
+
+def _ct_entries(query: str, timeout: float) -> list[dict]:
+    url = f"{CT_URL}?{urllib.parse.urlencode({'q': query, 'output': 'json', 'deduplicate': 'Y'})}"
+    req = urllib.request.Request(url, headers={"User-Agent": "CloudTec certificate check"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read()
+    return json.loads(body) if body.strip() else []
+
+
+def _ct_time(value: str) -> dt.datetime:
+    return dt.datetime.fromisoformat(value).replace(tzinfo=dt.timezone.utc)
+
+
+def ct_lookup(name: str, now: dt.datetime | None = None, timeout: float = 30) -> dict:
+    """The certificate for a public name that will lapse first, from the certificate logs (crt.sh).
+
+    Every publicly trusted certificate is logged when it's issued, so this works even when the server
+    can't be reached from here. A name can have several at once (say, Cloudflare's automatic edge
+    certificate and a GoDaddy one on the origin): for each issuer only the newest counts, since an
+    older one has been replaced, and the issuer whose newest certificate expires first is reported.
+    Issuers whose newest certificate expired over CT_RETIRED_DAYS ago are taken as no longer in use.
+    """
+    now = _now(now)
+    parent = name.split(".", 1)[1] if name.count(".") >= 2 else None
+    entries = _ct_entries(name, timeout) + (_ct_entries(f"*.{parent}", timeout) if parent else [])
+    newest: dict[str, dict] = {}
+    for e in entries:
+        names = {n.strip().lower() for n in e.get("name_value", "").split("\n")}
+        if name not in names and (not parent or f"*.{parent}" not in names):
+            continue
+        org = _issuer_org(e.get("issuer_name", ""))
+        if org not in newest or _ct_time(e["not_after"]) > _ct_time(newest[org]["not_after"]):
+            newest[org] = e
+    current = [e for e in newest.values()
+               if _ct_time(e["not_after"]) > now - dt.timedelta(days=CT_RETIRED_DAYS)]
+    if not current:
+        raise WatchError(f"No current certificate for {name} in the public certificate logs.")
+    e = min(current, key=lambda e: _ct_time(e["not_after"]))
+    not_after = _ct_time(e["not_after"])
+    return {"subject": f"CN={e.get('common_name', name)}", "issuer": e.get("issuer_name", ""),
+            "expires": not_after.isoformat(), "fingerprint": f"crtsh:{e.get('serial_number') or e['id']}",
+            "via": "certificate log", "ct_id": e.get("id"), **alert_level(not_after, now)}
+
+
 def _describe(cert: x509.Certificate, now: dt.datetime) -> dict:
     return {"subject": cert.subject.rfc4514_string(), "issuer": cert.issuer.rfc4514_string(),
             "expires": cert.not_valid_after_utc.isoformat(),
@@ -223,18 +293,30 @@ def _describe(cert: x509.Certificate, now: dt.datetime) -> dict:
 def check_target(entry: dict, now: dt.datetime | None = None, timeout: float = 10) -> dict:
     now = _now(now)
     target = entry["target"]
-    out = {**entry, "source": "file" if is_file_target(target) else "host", "error": None}
+    source = "ct" if target.lower().startswith(CT_PREFIX) else "file" if is_file_target(target) else "host"
+    out = {**entry, "source": source, "error": None}
     try:
-        if out["source"] == "file":
+        if source == "ct":
+            return {**out, **ct_lookup(target[len(CT_PREFIX):], now)}
+        if source == "file":
             certs = _load_certs(Path(target).read_bytes())
             # The soonest to expire is the one that will break things first.
             cert = min(certs, key=lambda c: c.not_valid_after_utc)
-        else:
-            cert = fetch_host_cert(*split_host(target), timeout=timeout)
-        return {**out, **_describe(cert, now)}
+            return {**out, **_describe(cert, now)}
+        host, port = split_host(target)
+        try:
+            return {**out, **_describe(fetch_host_cert(host, port, timeout=timeout), now)}
+        except (OSError, ssl.SSLError) as direct:
+            # Firewalls often block the connection; public names are also in the certificate logs.
+            if not _is_public_name(host.lower()):
+                raise
+            try:
+                return {**out, **ct_lookup(host.lower(), now), "direct_error": str(direct) or direct.__class__.__name__}
+            except Exception as e:
+                raise OSError(f"{direct or direct.__class__.__name__}; certificate log: {e}") from None
     except (OSError, ValueError, ssl.SSLError) as e:
         return {**out, "level": "error", "error": str(e) or e.__class__.__name__}
-    except Exception as e:  # e.g. TLSError from an unreadable file
+    except Exception as e:  # e.g. TLSError from an unreadable file, WatchError from the logs
         return {**out, "level": "error", "error": str(e)}
 
 
@@ -396,7 +478,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  ??  {r['target']}: couldn't check ({r['error']})")
             else:
                 mark = {"ok": "  OK", "warning": "  !!", "critical": " !!!", "expired": "XXXX"}[r["level"]]
-                print(f"{mark}  {r['target']}: expires {r['expires'][:10]} ({r['days_left']} days)")
+                via = f", from the {r['via']}" if r.get("via") else ""
+                print(f"{mark}  {r['target']}: expires {r['expires'][:10]} ({r['days_left']} days{via})")
     if args.email:
         try:
             for r in notify(settings, results):
