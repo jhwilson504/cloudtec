@@ -460,6 +460,7 @@ def crtsh(monkeypatch):
         return CRTSH.get(query, [])
 
     monkeypatch.setattr(certwatch, "_ct_entries", fake)
+    monkeypatch.setattr(certwatch, "_certspotter_entries", lambda name, timeout: [])
     return queries
 
 
@@ -537,3 +538,38 @@ def test_ct_falls_back_to_certspotter_when_crtsh_times_out(monkeypatch):
     monkeypatch.setattr(certwatch, "_certspotter_entries", lambda name, timeout: (_ for _ in ()).throw(OSError("blocked")))
     with pytest.raises(OSError, match="crt.sh: The read operation timed out; Cert Spotter: blocked"):
         certwatch.ct_lookup("btcme1.btcbahamas.com", CT_NOW)
+
+
+def test_ct_survives_a_failed_wildcard_search(monkeypatch):
+    # crt.sh answered "HTTP Error 404: Not Found" for the busy *.btcbahamas.com search from joey's PC.
+    def fake(query, timeout):
+        if query.startswith("*."):
+            raise OSError("HTTP Error 404: Not Found")
+        return CRTSH.get(query, [])
+
+    monkeypatch.setattr(certwatch, "_ct_entries", fake)
+    r = certwatch.ct_lookup("btcme1.btcbahamas.com", CT_NOW)
+    assert r["ct_source"] == "crt.sh" and r["expires"].startswith("2026-11-27")
+
+
+def test_ct_tries_certspotter_when_crtsh_finds_nothing(monkeypatch):
+    monkeypatch.setattr(certwatch, "_ct_entries", lambda query, timeout: [])
+    monkeypatch.setattr(certwatch, "_certspotter_entries", lambda name, timeout: CRTSH["btcbahamas.com"])
+    r = certwatch.ct_lookup("btcbahamas.com", NOW)
+    assert r["ct_source"] == "Cert Spotter" and r["expires"].startswith("2027-04-29")
+    monkeypatch.setattr(certwatch, "_certspotter_entries", lambda name, timeout: [])
+    with pytest.raises(certwatch.WatchError, match="No current certificate"):
+        certwatch.ct_lookup("btcbahamas.com", NOW)
+
+
+def test_old_servers_are_still_read(monkeypatch):
+    # esb.btcbahamas.com failed with UNSAFE_LEGACY_RENEGOTIATION_DISABLED: allow old servers, since
+    # only the certificate is read.
+    made = []
+    real = ssl.create_default_context
+    monkeypatch.setattr(certwatch.ssl, "create_default_context", lambda *a, **kw: made.append(real(*a, **kw)) or made[-1])
+    monkeypatch.setattr(certwatch.socket, "create_connection", lambda *a, **kw: (_ for _ in ()).throw(OSError("stop")))
+    with pytest.raises(OSError):
+        certwatch.fetch_host_cert("esb.example.com")
+    assert made[0].options & getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    assert made[0].verify_mode == ssl.CERT_NONE
