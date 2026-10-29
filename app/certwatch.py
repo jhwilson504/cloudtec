@@ -49,6 +49,7 @@ CONFIG, STATE = "cert_watch.json", "cert_alerts.json"
 CERT_EXTENSIONS = (".pem", ".cer", ".crt", ".der", ".p7b")
 CT_PREFIX = "ct:"                # look a name up in the public certificate logs instead of connecting
 CT_URL = "https://crt.sh/"
+CERTSPOTTER_URL = "https://api.certspotter.com/v1/issuances"
 CT_RETIRED_DAYS = 30             # an issuer whose newest certificate expired longer ago than this is no longer used
 
 
@@ -209,6 +210,14 @@ def fetch_host_cert(host: str, port: int = 443, timeout: float = 10) -> x509.Cer
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
+    # Older servers (say, an ESB appliance) need legacy renegotiation, old TLS versions or weak
+    # ciphers. Only the certificate is read and nothing is sent, so accept whatever they offer.
+    ctx.options |= getattr(ssl, "OP_LEGACY_SERVER_CONNECT", 0x4)
+    try:
+        ctx.minimum_version = ssl.TLSVersion.MINIMUM_SUPPORTED
+        ctx.set_ciphers("DEFAULT:@SECLEVEL=0")
+    except (ValueError, ssl.SSLError):
+        pass
     proxy = proxy_for(host)
     routes = ([("via proxy", lambda: _tunnel(proxy, host, port, timeout))] if proxy else []) + \
              [("direct", lambda: socket.create_connection((host, port), timeout=timeout))]
@@ -248,11 +257,25 @@ def _ct_entries(query: str, timeout: float) -> list[dict]:
     return json.loads(body) if body.strip() else []
 
 
+def _certspotter_entries(name: str, timeout: float) -> list[dict]:
+    """The same certificates from Cert Spotter (unexpired only), shaped like crt.sh's entries."""
+    query = urllib.parse.urlencode([("domain", name), ("match_wildcards", "true"),
+                                    ("expand", "dns_names"), ("expand", "issuer")])
+    req = urllib.request.Request(f"{CERTSPOTTER_URL}?{query}", headers={"User-Agent": "CloudTec certificate check"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        issuances = json.loads(resp.read() or b"[]")
+    return [{"id": None, "serial_number": i.get("cert_sha256") or i.get("tbs_sha256") or i.get("id"),
+             "issuer_name": (i.get("issuer") or {}).get("name", ""), "common_name": name,
+             "name_value": "\n".join(i.get("dns_names", [])), "not_after": i["not_after"]}
+            for i in issuances]
+
+
 def _ct_time(value: str) -> dt.datetime:
-    return dt.datetime.fromisoformat(value).replace(tzinfo=dt.timezone.utc)
+    t = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return t if t.tzinfo else t.replace(tzinfo=dt.timezone.utc)
 
 
-def ct_lookup(name: str, now: dt.datetime | None = None, timeout: float = 30) -> dict:
+def ct_lookup(name: str, now: dt.datetime | None = None, timeout: float = 45) -> dict:
     """The certificate for a public name that will lapse first, from the certificate logs (crt.sh).
 
     Every publicly trusted certificate is logged when it's issued, so this works even when the server
@@ -263,7 +286,35 @@ def ct_lookup(name: str, now: dt.datetime | None = None, timeout: float = 30) ->
     """
     now = _now(now)
     parent = name.split(".", 1)[1] if name.count(".") >= 2 else None
-    entries = _ct_entries(name, timeout) + (_ct_entries(f"*.{parent}", timeout) if parent else [])
+    try:
+        entries, source = _ct_entries(name, timeout), "crt.sh"
+        if parent:
+            try:
+                entries += _ct_entries(f"*.{parent}", timeout)
+            except Exception:  # a big wildcard search can fail (404, timeout); the name's own still count
+                pass
+        current = _ct_current(name, parent, entries, now)
+        if not current:
+            raise WatchError("nothing current")
+    except Exception as e:  # crt.sh is often slow or overloaded; Cert Spotter is a second log search
+        try:
+            entries, source = _certspotter_entries(name, min(timeout, 20)), "Cert Spotter"
+        except Exception as e2:
+            if isinstance(e, WatchError):
+                raise WatchError(f"No current certificate for {name} in the public certificate logs.") from None
+            raise OSError(f"crt.sh: {e or e.__class__.__name__}; Cert Spotter: {e2 or e2.__class__.__name__}") from None
+        current = _ct_current(name, parent, entries, now)
+    if not current:
+        raise WatchError(f"No current certificate for {name} in the public certificate logs.")
+    e = min(current, key=lambda e: _ct_time(e["not_after"]))
+    not_after = _ct_time(e["not_after"])
+    return {"subject": f"CN={e.get('common_name', name)}", "issuer": e.get("issuer_name", ""),
+            "expires": not_after.isoformat(), "fingerprint": f"ct:{e.get('serial_number') or e['id']}",
+            "via": "certificate log", "ct_source": source, "ct_id": e.get("id"), **alert_level(not_after, now)}
+
+
+def _ct_current(name: str, parent: str | None, entries: list[dict], now: dt.datetime) -> list[dict]:
+    """The newest logged certificate per issuer for this name, leaving out retired issuers."""
     newest: dict[str, dict] = {}
     for e in entries:
         names = {n.strip().lower() for n in e.get("name_value", "").split("\n")}
@@ -272,15 +323,8 @@ def ct_lookup(name: str, now: dt.datetime | None = None, timeout: float = 30) ->
         org = _issuer_org(e.get("issuer_name", ""))
         if org not in newest or _ct_time(e["not_after"]) > _ct_time(newest[org]["not_after"]):
             newest[org] = e
-    current = [e for e in newest.values()
-               if _ct_time(e["not_after"]) > now - dt.timedelta(days=CT_RETIRED_DAYS)]
-    if not current:
-        raise WatchError(f"No current certificate for {name} in the public certificate logs.")
-    e = min(current, key=lambda e: _ct_time(e["not_after"]))
-    not_after = _ct_time(e["not_after"])
-    return {"subject": f"CN={e.get('common_name', name)}", "issuer": e.get("issuer_name", ""),
-            "expires": not_after.isoformat(), "fingerprint": f"crtsh:{e.get('serial_number') or e['id']}",
-            "via": "certificate log", "ct_id": e.get("id"), **alert_level(not_after, now)}
+    return [e for e in newest.values()
+            if _ct_time(e["not_after"]) > now - dt.timedelta(days=CT_RETIRED_DAYS)]
 
 
 def _describe(cert: x509.Certificate, now: dt.datetime) -> dict:
