@@ -1,4 +1,4 @@
-"""In-memory stand-ins for AD and vCenter, for trying the console without a lab.
+"""In-memory stand-ins for AD, vCenter and iDRAC, for trying the console without a lab.
 
 Data is generated deterministically per connection, and actions (disable,
 unlock, power off, ...) change it for as long as the process runs. Some VM
@@ -11,6 +11,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from .base import ConnectorError
+from .idrac import summarize
 from .vsphere import GUEST_ACTIONS, POWER_ACTIONS, _check_vm
 
 FIRST = ["Ava", "Ben", "Chloe", "Dev", "Elena", "Femi", "Grace", "Hiro", "Isla", "Jon",
@@ -268,3 +269,43 @@ class DemoVSphere:
             raise ConnectorError("The VM is already powered on")
         v["power_state"] = {"start": "POWERED_ON", "stop": "POWERED_OFF", "shutdown": "POWERED_OFF",
                             "suspend": "SUSPENDED"}.get(action, state)
+
+
+def _idrac_servers(key: str) -> list[dict]:
+    rng = random.Random(f"idrac-{key}")
+    servers = []
+    for i in range(1, 7):
+        # Sample fault: two hosts have lost input power on one supply (an unplugged cord or tripped PDU).
+        dead = {2: 2, 5: 1}.get(i)
+        psus = [{"name": f"PS{n}", "health": "Critical" if n == dead else "OK", "state": "Enabled",
+                 "input_volts": None if n == dead else 230, "capacity_watts": 1400, "no_input": n == dead}
+                for n in (1, 2)]
+        tag = "".join(rng.choice("BCDFGHJKLMNPQRSTVWXYZ0123456789") for _ in range(7))
+        servers.append({
+            "host": f"10.0.10.{10 + i}", "name": f"esx{i:02d}.lab.local", "model": "PowerEdge R750",
+            "service_tag": tag, "bios": "1.13.2", "idrac_firmware": "7.10.30.00", "power_state": "On",
+            "health": "Critical" if dead else "OK", "cpus": 2, "cpu_model": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz",
+            "memory_gib": rng.choice([512, 768, 1024]), "psus": psus,
+            "problems": [f"PS{dead} has no input power"] if dead else [], "error": None,
+        })
+    return servers
+
+
+class DemoIDRAC:
+    def __init__(self, conn_id: str, config: dict):
+        self.data = _idrac_servers(conn_id)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def test(self) -> dict:
+        return {"ok": True, "message": f"Demo rack of {len(self.data)} iDRACs (no real server contacted)"}
+
+    def servers(self) -> list[dict]:
+        return [{**s, "psus": [dict(p) for p in s["psus"]]} for s in self.data]
+
+    def summary(self) -> dict:
+        return summarize(self.data)

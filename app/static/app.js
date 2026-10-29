@@ -2,7 +2,7 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $("#view");
-const state = { ad: null, vs: null, adTab: "users", vsTab: "vms", connKind: "ad" };
+const state = { ad: null, vs: null, idrac: null, adTab: "users", vsTab: "vms", connKind: "ad" };
 
 // ---- helpers -------------------------------------------------------------
 
@@ -120,11 +120,14 @@ function connectionPicker(conns, selected, id) {
 
 const isAdmin = () => state.me?.role === "admin";
 
+const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers" };
+
 function noConnections(kind) {
-  const label = kind === "ad" ? "Active Directory domain" : "vCenter";
+  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC" }[kind];
+  const article = kind === "idrac" ? "an" : "a";
   if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a CloudTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
-    <a class="btn primary" href="#/connections" onclick="state.connKind='${kind}'">Add a ${label}</a></div>`;
+    <a class="btn primary" href="#/connections" onclick="state.connKind='${kind}'">Add ${article} ${label}</a></div>`;
 }
 
 function debounce(fn, ms = 300) {
@@ -233,13 +236,14 @@ async function renderDashboard() {
   const banner = certBanner(certs);
   if (!items.length) {
     view.innerHTML = `${banner}<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
-      <p class="muted">Connect your Active Directory domains and vCenter servers to manage them from one place.</p></div></div>
-      <div class="grid">${certTile(certs)}${noConnections("ad")}${noConnections("vsphere")}${resetTile()}${powershellTile()}</div>`;
+      <p class="muted">Connect your Active Directory domains, vCenter servers and iDRACs to manage them from one place.</p></div></div>
+      <div class="grid">${certTile(certs)}${noConnections("ad")}${noConnections("vsphere")}${noConnections("idrac")}${resetTile()}${powershellTile()}</div>`;
     return;
   }
   const ok = items.filter((i) => i.summary);
   const ad = ok.filter((i) => i.kind === "ad").map((i) => i.summary);
   const vs = ok.filter((i) => i.kind === "vsphere").map((i) => i.summary);
+  const srv = ok.filter((i) => i.kind === "idrac").map((i) => i.summary);
   const sum = (arr, k) => arr.reduce((a, s) => a + (s[k] || 0), 0);
   const cap = sum(vs, "capacity"), free = sum(vs, "free_space");
 
@@ -256,6 +260,12 @@ async function renderDashboard() {
         <dt>Locked out</dt><dd>${s.locked ? `<span class="badge warn">${s.locked}</span>` : 0}</dd>
         <dt>Computers</dt><dd>${fmtNum(s.computers)}</dd>
         <dt>Groups</dt><dd>${fmtNum(s.groups)}</dd></dl>`;
+    else if (i.kind === "idrac") body = `<dl>
+        <dt>Servers</dt><dd>${s.reachable} reachable / ${s.servers}</dd>
+        <dt>Healthy</dt><dd>${s.healthy}</dd>
+        <dt>Need attention</dt><dd>${s.attention ? `<span class="badge bad">${s.attention}</span>` : 0}</dd>
+        <dt>Power supply faults</dt><dd>${s.psu_problems ? `<span class="badge bad">${s.psu_problems}</span>` : 0}</dd>
+        <dt>Powered on</dt><dd>${s.powered_on}</dd></dl>`;
     else {
       const used = s.capacity ? (1 - s.free_space / s.capacity) * 100 : 0;
       body = `<dl>
@@ -265,10 +275,10 @@ async function renderDashboard() {
         <dt>Storage used</dt><dd>${fmtBytes(s.capacity - s.free_space)} / ${fmtBytes(s.capacity)}</dd></dl>
         <div class="meter ${used > 85 ? "hot" : ""}"><div style="width:${used.toFixed(1)}%"></div></div>`;
     }
-    const link = i.kind === "ad" ? "#/directory" : "#/vsphere";
+    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers" }[i.kind];
     return `<div class="card conn-card"><div class="head">
         <div><a class="link" href="${link}" data-pick="${i.kind}:${esc(i.id)}"><b>${esc(i.name)}</b></a>
-          <div class="sub muted">${i.kind === "ad" ? "Active Directory" : "vCenter"}${i.demo ? " · demo" : ""}</div></div>
+          <div class="sub muted">${KIND_LABELS[i.kind]}${i.demo ? " · demo" : ""}</div></div>
         ${i.error ? '<span class="badge bad">Unreachable</span>' : '<span class="badge ok">Online</span>'}
       </div>${body}</div>`;
   }).join("");
@@ -283,12 +293,13 @@ async function renderDashboard() {
       ${stat("Virtual machines", fmtNum(sum(vs, "vms")), `${fmtNum(sum(vs, "powered_on"))} powered on`)}
       ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
       ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
+      ${srv.length ? stat("Physical servers", fmtNum(sum(srv, "servers")), `${fmtNum(sum(srv, "attention"))} need attention`) : ""}
     </div>
     <div class="grid">${certTile(certs)}${cards}${resetTile()}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
-    state[kind === "ad" ? "ad" : "vs"] = id;
+    state[{ ad: "ad", vsphere: "vs", idrac: "idrac" }[kind]] = id;
   }));
 }
 
@@ -729,6 +740,77 @@ async function showVm(connId, vmId) {
   }
 }
 
+// ---- servers (iDRAC) -------------------------------------------------------
+
+const HEALTH = { OK: ["ok", "Healthy"], Warning: ["warn", "Warning"], Critical: ["bad", "Critical"] };
+
+function healthBadge(h) {
+  const [cls, label] = HEALTH[h] ?? ["plain", h ?? "Unknown"];
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function psuBadges(psus) {
+  return psus.map((p) => {
+    const cls = p.state === "Absent" ? "plain" : p.health === "OK" ? "ok" : p.health ? "bad" : "plain";
+    const tip = p.state === "Absent" ? "empty slot" : p.no_input ? "no input power" : `${p.health ?? "unknown"}${p.input_volts ? `, ${p.input_volts} V in` : ""}`;
+    return `<span class="badge ${cls}" title="${esc(tip)}">${esc(p.name)}${p.no_input ? " no power" : ""}</span>`;
+  }).join(" ") || '<span class="muted">–</span>';
+}
+
+async function renderServers() {
+  loading();
+  const conns = (await api("GET", "/api/connections")).filter((c) => c.kind === "idrac");
+  const head = `<div class="page-head"><div><h1>Servers (iDRAC)</h1>
+      <p class="muted" style="margin:0">Hardware inventory and health, read from each server's iDRAC. Nothing on the servers is changed.</p></div>
+      ${conns.length ? '<button class="btn" id="srv-refresh">Refresh</button>' : ""}</div>`;
+  if (!conns.length) { view.innerHTML = head + noConnections("idrac"); return; }
+  if (!conns.some((c) => c.id === state.idrac)) state.idrac = conns[0].id;
+
+  view.innerHTML = `${head}
+    <div class="toolbar">${connectionPicker(conns, state.idrac, "srv-conn")}</div>
+    <div id="srv-body"><p class="muted">Asking each iDRAC…</p></div>`;
+
+  async function load() {
+    const box = $("#srv-body");
+    box.innerHTML = '<p class="muted">Asking each iDRAC…</p>';
+    try {
+      const servers = await api("GET", `/api/idrac/${state.idrac}/servers`);
+      const ok = servers.filter((s) => !s.error);
+      const count = (f) => ok.filter(f).length;
+      const stat = (label, value, sub = "") =>
+        `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+      const problems = servers.flatMap((s) => (s.error ? [`${s.host}: ${s.error}`] : s.problems.map((p) => `${s.name}: ${p}`)));
+      box.innerHTML = `<div class="stats">
+          ${stat("Servers", servers.length, `${ok.length} reachable`)}
+          ${stat("Healthy", count((s) => s.health === "OK"))}
+          ${stat("Need attention", count((s) => s.health === "Warning" || s.health === "Critical"))}
+          ${stat("Power supply faults", count((s) => s.problems.some((p) => p.startsWith("PS"))), "no redundancy while a supply is down")}
+        </div>
+        ${problems.length ? `<div class="notice bad" style="margin-bottom:14px"><b>Needs attention</b>
+          <ul style="margin:6px 0 0;padding-left:20px">${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>` : ""}
+        ${table(["Server", "Health", "Model", "Service tag", "Power supplies", "CPU / memory", "Firmware"], servers.map((s) => s.error
+          ? `<tr><td><b>${esc(s.host)}</b></td><td><span class="badge plain">Unreachable</span></td>
+              <td colspan="5" class="muted">${esc(s.error)}</td></tr>`
+          : `<tr>
+          <td><b>${esc(s.name)}</b><div class="sub mono"><a class="link" href="https://${esc(s.host)}" target="_blank" rel="noopener">${esc(s.host)}</a></div></td>
+          <td>${healthBadge(s.health)} ${s.power_state && s.power_state !== "On" ? `<span class="badge plain">${esc(s.power_state)}</span>` : ""}</td>
+          <td>${esc(s.model || "–")}</td>
+          <td class="mono">${esc(s.service_tag || "–")}</td>
+          <td style="white-space:nowrap">${psuBadges(s.psus)}</td>
+          <td>${s.cpus ?? "–"} CPU${s.memory_gib ? ` · ${fmtNum(s.memory_gib)} GB` : ""}<div class="sub">${esc(s.cpu_model || "")}</div></td>
+          <td><div class="sub">BIOS ${esc(s.bios || "–")}</div><div class="sub">iDRAC ${esc(s.idrac_firmware || "–")}</div></td></tr>`),
+          "No servers in this connection.")}
+        <p class="muted small-note">The address opens that server's iDRAC web page.</p>`;
+    } catch (err) {
+      box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+    }
+  }
+
+  $("#srv-conn")?.addEventListener("change", (e) => { state.idrac = e.target.value; load(); });
+  $("#srv-refresh").onclick = load;
+  load();
+}
+
 // ---- cross-check ---------------------------------------------------------
 
 async function renderCrosscheck() {
@@ -810,8 +892,8 @@ async function renderConnections() {
   const conns = await api("GET", "/api/connections");
   const rows = conns.map((c, i) => `<tr>
     <td><b>${esc(c.name)}</b> ${c.demo ? '<span class="badge info">demo</span>' : ""}</td>
-    <td>${c.kind === "ad" ? "Active Directory" : "vCenter"}</td>
-    <td class="mono">${esc(c.config.host || "–")}</td>
+    <td>${KIND_LABELS[c.kind]}</td>
+    <td class="mono">${esc(c.config.host || c.config.hosts?.join(", ") || "–")}</td>
     <td class="mono">${esc(c.config.bind_user || c.config.username || "–")}</td>
     <td class="actions"><button class="btn small" data-test="${i}">Test</button>
       <button class="btn small danger" data-del="${i}">Remove</button></td></tr>`);
@@ -822,7 +904,7 @@ async function renderConnections() {
     <div class="card section">
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <h2 style="margin:0">Add a connection</h2>
-        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button></div>
+        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button></div>
       </div>
       <form id="conn-form" class="form" autocomplete="off"></form>
     </div>`;
@@ -848,18 +930,23 @@ async function renderConnections() {
 
   function drawForm() {
     kindBtns.forEach((b) => b.classList.toggle("active", b.dataset.k === state.connKind));
-    const ad = state.connKind === "ad";
+    const ad = state.connKind === "ad", idrac = state.connKind === "idrac";
+    const where = idrac
+      ? `<label class="full"><span>iDRAC addresses, one per line (they must all use the account below)</span>
+          <textarea name="hosts" rows="4" spellcheck="false" placeholder="10.0.10.11
+10.0.10.12"></textarea></label>`
+      : `<label>${ad ? "Domain controller" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : "vcenter.corp.example.com"}"></label>
+      <label>Port <input name="port" type="number" placeholder="${ad ? "636" : "443"}"></label>`;
     $("#conn-form").innerHTML = `
-      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : "Production vCenter"}"></label>
-      <label>${ad ? "Domain controller" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : "vcenter.corp.example.com"}"></label>
-      <label>Port <input name="port" type="number" placeholder="${ad ? "636" : "443"}"></label>
+      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : "Production vCenter"}"></label>
+      ${where}
       ${ad ? `<label class="full">Base DN <input name="base_dn" placeholder="DC=corp,DC=example,DC=com"></label>
         <label>Bind account <input name="bind_user" placeholder="svc-cloudtec@corp.example.com"></label>`
-           : `<label>Username <input name="username" placeholder="administrator@vsphere.local"></label>`}
+           : `<label>Username <input name="username" placeholder="${idrac ? "root, or a read-only iDRAC user" : "administrator@vsphere.local"}"></label>`}
       <label>Password <input name="password" type="password" autocomplete="new-password"></label>
       <div class="full row" style="gap:20px">
         ${ad ? '<label class="inline"><input type="checkbox" name="use_ssl" checked> Use LDAPS (required for password resets)</label>' : ""}
-        <label class="inline"><input type="checkbox" name="verify_ssl" checked> Verify certificate</label>
+        <label class="inline"><input type="checkbox" name="verify_ssl" ${idrac ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : ""}</label>
         <label class="inline"><input type="checkbox" name="demo"> Demo mode (sample data, no server needed)</label>
       </div>
       <div class="full" id="form-msg"></div>
@@ -867,8 +954,8 @@ async function renderConnections() {
         <button type="submit" class="btn primary">Save connection</button></div>`;
     const form = $("#conn-form");
     form.demo.onchange = () => {
-      form.querySelectorAll("input:not([name=demo]):not([name=name])").forEach((el) => el.disabled = form.demo.checked);
-      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : "Demo vCenter";
+      form.querySelectorAll("input:not([name=demo]):not([name=name]), textarea").forEach((el) => el.disabled = form.demo.checked);
+      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : "Demo vCenter";
     };
     const body = () => {
       const f = new FormData(form);
@@ -878,6 +965,7 @@ async function renderConnections() {
         if (v) config[key] = key === "port" ? Number(v) : v;
       }
       if (ad) config.use_ssl = form.use_ssl.checked;
+      if (idrac) config.hosts = (f.get("hosts") || "").split(/[\s,;]+/).filter(Boolean);
       config.verify_ssl = form.verify_ssl.checked;
       return { kind: state.connKind, name: form.name.value.trim(), config, password: f.get("password") || "", demo: form.demo.checked };
     };
@@ -1048,10 +1136,10 @@ const shellHistory = [];  // commands, for the up/down arrow keys
 async function renderShell() {
   loading();
   const [s, conns] = await Promise.all([api("GET", "/api/shell"), api("GET", "/api/connections")]);
-  const real = conns.filter((c) => !c.demo);
+  const real = conns.filter((c) => !c.demo && (c.kind === "ad" || c.kind === "vsphere"));
   const connectBar = real.length
     ? `<div class="toolbar"><span class="muted">Sign this session in to</span>
-        <select id="sh-conn">${real.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${c.kind === "ad" ? "Active Directory" : "vCenter"})</option>`).join("")}</select>
+        <select id="sh-conn">${real.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${KIND_LABELS[c.kind]})</option>`).join("")}</select>
         <button class="btn primary" id="sh-connect">Connect</button>
         <span class="muted small-note" style="margin:0">Uses the account and password saved in Connections.</span></div>`
     : `<p class="muted">Add an Active Directory or vCenter on the <a href="#/connections">Connections</a> page to sign this session in to it with one click.</p>`;
@@ -1330,6 +1418,7 @@ const routes = {
   dashboard: renderDashboard,
   directory: renderDirectory,
   vsphere: renderVSphere,
+  servers: renderServers,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
   powershell: renderShell,
