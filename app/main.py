@@ -1,4 +1,4 @@
-"""CloudTec Center: one console for Active Directory and vSphere."""
+"""CloudTec Center: one console for Active Directory, vSphere and iDRAC."""
 
 import json
 import logging
@@ -21,6 +21,7 @@ from . import certwatch
 from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
 from .connectors import ConnectorError, open_connector
+from .connectors.idrac import parse_hosts
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -32,6 +33,7 @@ STATIC = Path(__file__).parent / "static"
 CONFIG_FIELDS = {
     "ad": ("host", "port", "use_ssl", "verify_ssl", "base_dn", "bind_user"),
     "vsphere": ("host", "port", "verify_ssl", "username"),
+    "idrac": ("hosts", "verify_ssl", "username"),
 }
 
 
@@ -72,7 +74,7 @@ class ShellConnectBody(BaseModel):
 
 
 class ConnectionBody(BaseModel):
-    kind: Literal["ad", "vsphere"]
+    kind: Literal["ad", "vsphere", "idrac"]
     name: str = Field(min_length=1, max_length=80)
     config: dict = {}
     password: str = ""
@@ -99,7 +101,13 @@ class PowerBody(BaseModel):
 
 
 def _clean_config(kind: str, config: dict) -> dict:
-    return {k: config[k] for k in CONFIG_FIELDS[kind] if k in config and config[k] not in ("", None)}
+    out = {k: config[k] for k in CONFIG_FIELDS[kind] if k in config and config[k] not in ("", None)}
+    if kind == "idrac":
+        try:
+            out["hosts"] = parse_hosts(out.get("hosts"))
+        except ConnectorError as e:
+            raise HTTPException(422, str(e)) from e
+    return out
 
 
 # Ports checked on each domain controller, from the computer CloudTec runs on.
@@ -541,6 +549,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Connection not found")
         if conn.demo:
             raise HTTPException(422, f"{conn.name} is a demo connection, so there's no real server to connect to.")
+        if conn.kind not in ("ad", "vsphere"):
+            raise HTTPException(422, "PowerShell can only sign in to Active Directory and vCenter connections.")
         audit(request, "PowerShell: signed session in", conn.name, conn)
         return session.run(connect_script(conn), timeout=120, log_as=f"[connect] {conn.name} ({conn.kind})")
 
@@ -646,6 +656,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def vs_clusters(conn_id: str):
         with open_connector(get_conn(conn_id, "vsphere")) as c:
             return c.clusters()
+
+    # --- iDRAC -------------------------------------------------------------
+
+    @app.get("/api/idrac/{conn_id}/servers", dependencies=api)
+    def idrac_servers(conn_id: str):
+        with open_connector(get_conn(conn_id, "idrac")) as c:
+            return c.servers()
 
     # --- UI ----------------------------------------------------------------
 

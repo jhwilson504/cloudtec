@@ -1,12 +1,13 @@
 # CloudTec Center
 
-One web console for your **Active Directory** domains and **VMware vSphere** (vCenter) servers.
+One web console for your **Active Directory** domains, **VMware vSphere** (vCenter) servers and **Dell iDRAC** server hardware.
 
 - **Dashboard**: users, lockouts, computers, VMs, hosts and storage across every connection at a glance.
 - **Active Directory**: browse and search users, groups and computers. Unlock accounts, enable or disable them, and reset passwords.
 - **Reset password**: a page (and dashboard tile) to find a user, set or generate a new password, unlock the account, and require a change at next sign-in.
 - **Domain controllers**: every DC with its site, Global Catalog / read-only flags and FSMO roles, plus a check from the CloudTec computer to ports 389, 636, 3268 and 9389 (AD Web Services, needed by the PowerShell AD cmdlets).
 - **vSphere**: browse VMs, hosts, datastores and clusters. Power on, shut down or restart the guest, power off, and view VM details (guest OS, IP, disks, NICs).
+- **Servers (iDRAC)**: hardware inventory and health from each Dell server's iDRAC: model, service tag, BIOS and iDRAC firmware, CPUs, memory, and each power supply, with any that has lost input power called out on the page and the dashboard. Read-only: CloudTec never changes anything on a server.
 - **Cross-check**: lines up AD computer accounts with VMs by hostname, so you can see VMs that never joined the domain and computer accounts with no VM behind them.
 - **PowerShell**: a PowerShell window inside CloudTec (also on the dashboard). The session keeps variables, the current folder and loaded modules between commands, so you can `Import-Module ActiveDirectory` once and keep working.
 - **Global search**: one search box across every domain and vCenter, with actions available straight from the results.
@@ -38,6 +39,11 @@ Open http://localhost:8000 and sign in, then go to **Connections**. Tick **Demo 
 |---|---|
 | vCenter host | `vcenter.corp.example.com` |
 | Username | `administrator@vsphere.local` or a delegated account |
+
+| iDRAC | |
+|---|---|
+| iDRAC addresses | one per line, e.g. `10.0.10.11` … `10.0.10.16`. One connection can hold every server that shares the same iDRAC account. |
+| Username | `root`, or better, an iDRAC user with the *Read Only* role |
 
 Use **Test connection** before saving. Untick **Verify certificate** only if your DC or vCenter uses a self-signed certificate you can't add to the trust store.
 
@@ -148,6 +154,11 @@ Commands run on the computer CloudTec runs on, as the Windows user who started C
 - *Shut down* and *Restart* go through VMware Tools. *Power off* is a hard power-off.
 - A read-only role is enough for browsing. Power actions need *Virtual machine > Interaction > Power on/off/Reset* and *Guest operations*.
 
+**iDRAC**
+- iDRAC9 or later (uses the Redfish API on port 443). The PC running CloudTec must be able to reach each iDRAC address.
+- A *Read Only* iDRAC user is enough: CloudTec only reads.
+- iDRACs ship with a self-signed certificate, so leave *Verify certificate* unticked unless you've given them trusted ones.
+
 ## Security notes
 
 - The console holds privileged credentials, so treat it like a jump host. Keep it on a management network, put it behind HTTPS (for example a reverse proxy), and set `CLOUDTEC_SECURE_COOKIES=true`.
@@ -172,7 +183,8 @@ app/
   connectors/
     ad.py              Active Directory (ldap3)
     vsphere.py         vCenter REST API (httpx)
-    demo.py            sample-data stand-ins for both
+    idrac.py           Dell iDRAC Redfish API (httpx), read-only
+    demo.py            sample-data stand-ins for all three
   static/              web UI (plain HTML/CSS/JS, no build step)
 tests/
 ```

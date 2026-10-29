@@ -234,3 +234,22 @@ def test_domain_controllers_endpoint(client):
     assert r["ports"]["9389"] == "AD Web Services"
     assert r["dcs"] and all(set(d["ports"]) == {"389", "636", "3268", "9389"} for d in r["dcs"])
     assert any("PDC" in d["roles"] for d in r["dcs"])
+
+
+def test_idrac_servers(client):
+    srv = add_demo(client, "idrac", "Rack")
+    servers = client.get(f"/api/idrac/{srv}/servers").json()
+    assert len(servers) == 6 and all(s["model"] == "PowerEdge R750" for s in servers)
+    assert any(p["no_input"] for s in servers for p in s["psus"])
+    dash = {d["name"]: d for d in client.get("/api/dashboard").json()}
+    assert dash["Rack"]["summary"]["psu_problems"] == 2
+    assert client.get(f"/api/vsphere/{srv}/vms").status_code == 404
+
+
+def test_idrac_hosts_are_cleaned(client):
+    r = client.post("/api/connections", json={"kind": "idrac", "name": "r", "password": "pw",
+                                              "config": {"hosts": ["10.0.0.1", " 10.0.0.1 ", "10.0.0.2"], "username": "root"}})
+    assert r.status_code == 201 and r.json()["config"]["hosts"] == ["10.0.0.1", "10.0.0.2"]
+    r = client.post("/api/connections", json={"kind": "idrac", "name": "r", "password": "pw",
+                                              "config": {"hosts": ["bad host/x"], "username": "root"}})
+    assert r.status_code == 422
