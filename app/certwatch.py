@@ -1,6 +1,6 @@
 """Certificate expiry alerts.
 
-Watches CloudTec's own HTTPS certificate (<data dir>/tls/cert.pem) plus a list of other
+Watches KasTec's own HTTPS certificate (<data dir>/tls/cert.pem) plus a list of other
 certificates, and warns 30 and then 21 days before each one expires: as a banner on the
 dashboard, and by email when an SMTP server is configured.
 
@@ -42,6 +42,7 @@ from cryptography.hazmat.primitives import hashes
 
 from .config import Settings
 from .tls import CERT, _load_certs, _write
+from .config import env
 
 ALERT_DAYS = (30, 21)            # alert stages, in days before expiry
 RENEW_DAYS = ALERT_DAYS[0]       # the first alert: time to renew
@@ -90,7 +91,7 @@ def own_cert(data_dir: Path) -> x509.Certificate | None:
 
 
 def days_left(data_dir: Path, now: dt.datetime | None = None) -> int | None:
-    """Days until CloudTec's own HTTPS certificate expires, or None if there isn't one."""
+    """Days until KasTec's own HTTPS certificate expires, or None if there isn't one."""
     cert = own_cert(data_dir)
     return None if cert is None else alert_level(cert.not_valid_after_utc, now)["days_left"]
 
@@ -167,10 +168,10 @@ def save_config(data_dir: Path, targets: list, email_to: list[str]) -> dict:
 def proxy_for(host: str) -> tuple[str, int] | None:
     """The HTTPS proxy to reach a host through, if this PC uses one.
 
-    CLOUDTEC_CERT_PROXY (host:port, or "off") wins; otherwise HTTPS_PROXY or, on Windows, the
+    KASTEC_CERT_PROXY (host:port, or "off") wins; otherwise HTTPS_PROXY or, on Windows, the
     proxy set in Internet Options, skipping the hosts listed there as bypassed.
     """
-    setting = os.environ.get("CLOUDTEC_CERT_PROXY", "").strip()
+    setting = env("CERT_PROXY", "").strip()
     if setting.lower() in ("off", "none", "direct"):
         return None
     if not setting:
@@ -251,7 +252,7 @@ def _issuer_org(issuer: str) -> str:
 
 def _ct_entries(query: str, timeout: float) -> list[dict]:
     url = f"{CT_URL}?{urllib.parse.urlencode({'q': query, 'output': 'json', 'deduplicate': 'Y'})}"
-    req = urllib.request.Request(url, headers={"User-Agent": "CloudTec certificate check"})
+    req = urllib.request.Request(url, headers={"User-Agent": "KasTec certificate check"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read()
     return json.loads(body) if body.strip() else []
@@ -261,7 +262,7 @@ def _certspotter_entries(name: str, timeout: float) -> list[dict]:
     """The same certificates from Cert Spotter (unexpired only), shaped like crt.sh's entries."""
     query = urllib.parse.urlencode([("domain", name), ("match_wildcards", "true"),
                                     ("expand", "dns_names"), ("expand", "issuer")])
-    req = urllib.request.Request(f"{CERTSPOTTER_URL}?{query}", headers={"User-Agent": "CloudTec certificate check"})
+    req = urllib.request.Request(f"{CERTSPOTTER_URL}?{query}", headers={"User-Agent": "KasTec certificate check"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         issuances = json.loads(resp.read() or b"[]")
     return [{"id": None, "serial_number": i.get("cert_sha256") or i.get("tbs_sha256") or i.get("id"),
@@ -365,12 +366,12 @@ def check_target(entry: dict, now: dt.datetime | None = None, timeout: float = 1
 
 
 def check_all(data_dir: Path, now: dt.datetime | None = None, timeout: float = 10) -> list[dict]:
-    """CloudTec's own certificate first, then every configured target."""
+    """KasTec's own certificate first, then every configured target."""
     now = _now(now)
     results = []
     cert = own_cert(data_dir)
     if cert is not None:
-        results.append({"target": "CloudTec (this server)", "owners": [], "note": "", "source": "cloudtec",
+        results.append({"target": "KasTec (this server)", "owners": [], "note": "", "source": "cloudtec",
                         "error": None, **_describe(cert, now)})
     results += [check_target(t, now, timeout) for t in read_config(data_dir)["targets"]]
     return results
@@ -388,7 +389,7 @@ def email_enabled(settings: Settings) -> bool:
 
 def send_email(settings: Settings, to: list[str], subject: str, body: str) -> None:
     if not settings.smtp_host:
-        raise WatchError("No mail server is set up (CLOUDTEC_SMTP_HOST).")
+        raise WatchError("No mail server is set up (KASTEC_SMTP_HOST).")
     msg = EmailMessage()
     msg["Subject"], msg["To"] = subject, ", ".join(to)
     msg["From"] = settings.alert_from or settings.smtp_user or f"cloudtec@{socket.getfqdn()}"
@@ -445,7 +446,7 @@ def notify(settings: Settings, results: list[dict], now: dt.datetime | None = No
                    else f"{len(items)} certificates need renewing (soonest in {max(worst, 0)} days)")
         body = ("These certificates are expiring soon and need renewing:\n\n"
                 + "\n\n".join(_line(r) for r in items)
-                + f"\n\nCloudTec warns {' and '.join(map(str, ALERT_DAYS))} days before a certificate expires, "
+                + f"\n\nKasTec warns {' and '.join(map(str, ALERT_DAYS))} days before a certificate expires, "
                   "and again once it has expired.\n")
         send_email(settings, list(to), subject, body)
         stamp = _now(now).isoformat(timespec="seconds")
@@ -508,8 +509,8 @@ class Watcher:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m app.certwatch",
                                 description="Check certificate expiry. Exit code 2 if any need attention.")
-    p.add_argument("--data-dir", default=os.environ.get("CLOUDTEC_DATA_DIR", "data"))
-    p.add_argument("--email", action="store_true", help="email new alerts (needs CLOUDTEC_SMTP_HOST)")
+    p.add_argument("--data-dir", default=env("DATA_DIR", "data"))
+    p.add_argument("--email", action="store_true", help="email new alerts (needs KASTEC_SMTP_HOST)")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
     settings = dataclasses.replace(Settings.from_env(), data_dir=Path(args.data_dir))

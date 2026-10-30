@@ -1,8 +1,8 @@
 @echo off
-rem Double-click to let colleagues use CloudTec from their own PCs, over HTTPS.
-rem Sets up a certificate, opens the Windows Firewall port and switches CloudTec to network mode.
+rem Double-click to let colleagues use KasTec from their own PCs, over HTTPS.
+rem Sets up a certificate, opens the Windows Firewall port and switches KasTec to network mode.
 setlocal
-title CloudTec Center - network access
+title KasTec Center - network access
 
 rem Adding the firewall rule needs Administrator: ask for it.
 net session >nul 2>nul
@@ -21,7 +21,7 @@ if not errorlevel 1 (
   if not errorlevel 1 set "PY=python"
 )
 if not defined PY (
-  echo Python is not installed. Run "Start CloudTec" first, it explains how to install it.
+  echo Python is not installed. Run "Start KasTec" first, it explains how to install it.
   pause
   exit /b 1
 )
@@ -30,5 +30,5 @@ if errorlevel 1 %PY% -m pip install -r requirements.txt
 
 %PY% -m app.tls
 echo.
-echo When you're done, double-click "Start CloudTec" to restart CloudTec with these settings.
+echo When you're done, double-click "Start KasTec" to restart KasTec with these settings.
 pause

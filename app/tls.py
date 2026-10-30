@@ -1,13 +1,13 @@
-"""HTTPS certificates and network access for CloudTec.
+"""HTTPS certificates and network access for KasTec.
 
 Everything lives in <data dir>/tls:
 
     key.pem, cert.pem       the server's private key and certificate (plus chain) in use
     request.csr             a certificate request to give a company CA (with pending-key.pem)
-    ca.pem, ca-key.pem      CloudTec's own small CA, only if that option was chosen
-    CloudTec-CA.cer         the same CA certificate, ready to double-click / deploy by GPO
+    ca.pem, ca-key.pem      KasTec's own small CA, only if that option was chosen
+    KasTec-CA.cer         the same CA certificate, ready to double-click / deploy by GPO
 
-<data dir>/network.json switches CloudTec from "this PC only" (http://localhost:8000)
+<data dir>/network.json switches KasTec from "this PC only" (http://localhost:8000)
 to listening on the network over HTTPS (port 8443 by default).
 
 Run "python -m app.tls" for an interactive setup, or see "python -m app.tls --help".
@@ -31,10 +31,13 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
+from .config import env
+
 DEFAULT_PORT = 8443
 KEY, CERT, CSR, PENDING_KEY = "key.pem", "cert.pem", "request.csr", "pending-key.pem"
-CA_CERT, CA_KEY, CA_CER = "ca.pem", "ca-key.pem", "CloudTec-CA.cer"
-FIREWALL_RULE = "CloudTec Center (HTTPS)"
+CA_CERT, CA_KEY, CA_CER = "ca.pem", "ca-key.pem", "KasTec-CA.cer"
+FIREWALL_RULE = "KasTec Center (HTTPS)"
+OLD_FIREWALL_RULE = "CloudTec Center (HTTPS)"  # the rule's name before the rename to KasTec
 
 
 class TLSError(Exception):
@@ -132,7 +135,7 @@ def _load_certs(data: bytes) -> list[x509.Certificate]:
         try:
             return pkcs7.load_der_pkcs7_certificates(data)
         except ValueError as e:
-            raise TLSError("That file isn't a certificate CloudTec can read (.cer, .crt, .pem or .p7b).") from e
+            raise TLSError("That file isn't a certificate KasTec can read (.cer, .crt, .pem or .p7b).") from e
 
 
 def _same_key(cert: x509.Certificate, key) -> bool:
@@ -149,7 +152,7 @@ def install_cert(data_dir: Path, cert_file: Path) -> x509.Certificate:
     certs = _load_certs(Path(cert_file).read_bytes())
     leaf = next((c for c in certs if _same_key(c, key)), None)
     if leaf is None:
-        raise TLSError("That certificate wasn't issued for CloudTec's request (the keys don't match).")
+        raise TLSError("That certificate wasn't issued for KasTec's request (the keys don't match).")
     chain = [leaf] + [c for c in certs if c is not leaf]
     _write(d / CERT, b"".join(_pem(c) for c in chain))
     _write(d / KEY, _key_pem(key), private=True)
@@ -173,10 +176,10 @@ def import_pfx(data_dir: Path, pfx_file: Path, password: str | None) -> x509.Cer
     return cert
 
 
-# --- option 3: CloudTec's own CA ------------------------------------------------
+# --- option 3: KasTec's own CA ------------------------------------------------
 
 def make_own_ca_cert(data_dir: Path, names: list[str], ips: list[str], days: int = 825) -> x509.Certificate:
-    """Create (or reuse) a small CloudTec CA, and issue this PC's certificate from it."""
+    """Create (or reuse) a small KasTec CA, and issue this PC's certificate from it."""
     d = tls_dir(data_dir)
     now = dt.datetime.now(dt.timezone.utc)
     if (d / CA_CERT).exists() and (d / CA_KEY).exists():
@@ -184,7 +187,7 @@ def make_own_ca_cert(data_dir: Path, names: list[str], ips: list[str], days: int
         ca = x509.load_pem_x509_certificate((d / CA_CERT).read_bytes())
     else:
         ca_key = _new_key()
-        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"CloudTec CA ({names[0]})")])
+        ca_name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, f"KasTec CA ({names[0]})")])
         ca = (x509.CertificateBuilder()
               .subject_name(ca_name).issuer_name(ca_name)
               .public_key(ca_key.public_key()).serial_number(x509.random_serial_number())
@@ -197,6 +200,7 @@ def make_own_ca_cert(data_dir: Path, names: list[str], ips: list[str], days: int
               .sign(ca_key, hashes.SHA256()))
         _write(d / CA_KEY, _key_pem(ca_key), private=True)
         _write(d / CA_CERT, _pem(ca))
+    if not (d / CA_CER).exists():  # also covers a CA made before the rename (CloudTec-CA.cer)
         _write(d / CA_CER, ca.public_bytes(serialization.Encoding.DER))
 
     key = _new_key()
@@ -248,7 +252,7 @@ def open_firewall(port: int) -> tuple[bool, str]:
     """Allow inbound TCP <port> in Windows Firewall (needs Administrator)."""
     if os.name != "nt":
         return False, "Not Windows: open the port in this machine's firewall yourself."
-    script = (f"Remove-NetFirewallRule -DisplayName '{FIREWALL_RULE}' -ErrorAction SilentlyContinue; "
+    script = (f"Remove-NetFirewallRule -DisplayName '{FIREWALL_RULE}','{OLD_FIREWALL_RULE}' -ErrorAction SilentlyContinue; "
               f"New-NetFirewallRule -DisplayName '{FIREWALL_RULE}' -Direction Inbound -Protocol TCP "
               f"-LocalPort {port} -Action Allow -Profile Domain,Private | Out-Null")
     r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
@@ -271,12 +275,12 @@ def _finish(data_dir: Path, port: int) -> None:
     ok, msg = open_firewall(port)
     print(("  OK  " if ok else "  !!  ") + msg)
     s = cert_summary(data_dir)
-    print("\nDone. Start CloudTec with 'Start CloudTec', then colleagues can open:")
+    print("\nDone. Start KasTec with 'Start KasTec', then colleagues can open:")
     for n in s["names"]:
         if n not in ("localhost", "127.0.0.1"):
             print(f"    https://{n}:{port}")
     if s["own_ca"]:
-        print(f"\nBecause this uses CloudTec's own CA, each colleague's PC must trust it once:\n"
+        print(f"\nBecause this uses KasTec's own CA, each colleague's PC must trust it once:\n"
               f"  - deploy {data_dir / 'tls' / CA_CER} by Group Policy (Computer Configuration > Policies >\n"
               f"    Windows Settings > Security Settings > Public Key Policies > Trusted Root Certification Authorities), or\n"
               f"  - on each PC, double-click {CA_CER} > Install Certificate > Local Machine >\n"
@@ -285,24 +289,24 @@ def _finish(data_dir: Path, port: int) -> None:
 
 def wizard(data_dir: Path) -> None:
     names, ips = default_names()
-    print("CloudTec Center - network access over HTTPS\n")
+    print("KasTec Center - network access over HTTPS\n")
     s = cert_summary(data_dir)
     if s:
         print(f"Current certificate: {s['subject']}, issued by {s['issuer']}, expires {s['expires'][:10]}")
         print(f"  for: {', '.join(s['names'])}\n")
     if (tls_dir(data_dir) / PENDING_KEY).exists():
         print("A certificate request is waiting for your CA's certificate.\n")
-    print("How should CloudTec get its certificate?")
+    print("How should KasTec get its certificate?")
     print("  1  From my company's certificate authority (recommended - no browser warnings on domain PCs)")
     print("  2  Install the certificate my CA issued for the request from option 1")
     print("  3  Import an existing .pfx file (certificate with private key)")
-    print("  4  Use CloudTec's own CA (quick; colleagues' PCs must trust it once)")
+    print("  4  Use KasTec's own CA (quick; colleagues' PCs must trust it once)")
     print("  5  Turn network access off again (back to this PC only)")
     choice = _ask("\nChoose 1-5")
 
     if choice == "5":
         set_network(data_dir, False)
-        print("Network access is off. CloudTec will only be reachable at http://localhost:8000 on this PC.")
+        print("Network access is off. KasTec will only be reachable at http://localhost:8000 on this PC.")
         return
     if choice in ("1", "4"):
         print(f"\nThe certificate will be valid for: {', '.join(names + ips)}")
@@ -340,8 +344,8 @@ def wizard(data_dir: Path) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="python -m app.tls", description="HTTPS and network access for CloudTec.")
-    p.add_argument("--data-dir", default=os.environ.get("CLOUDTEC_DATA_DIR", "data"))
+    p = argparse.ArgumentParser(prog="python -m app.tls", description="HTTPS and network access for KasTec.")
+    p.add_argument("--data-dir", default=env("DATA_DIR", "data"))
     sub = p.add_subparsers(dest="cmd")
     sub.add_parser("status", help="show the certificate and network setting")
     for name in ("csr", "own-ca"):

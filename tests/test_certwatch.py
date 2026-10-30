@@ -375,7 +375,7 @@ def test_api_lists_alerts(tmp_path, client):
     assert r.status_code == 200, r.text
     body = r.json()
     assert [(a["target"], a["level"]) for a in body["alerts"]] == [
-        ("CloudTec (this server)", "critical"), (str(tmp_path / "trail.pem"), "warning")]
+        ("KasTec (this server)", "critical"), (str(tmp_path / "trail.pem"), "warning")]
     assert body["checked"]
     assert json.loads((tmp_path / "cert_watch.json").read_text())["email_to"] == ["sysops@example.com"]
     assert "certificates.config" in (tmp_path / "audit.log").read_text()
@@ -384,7 +384,7 @@ def test_api_lists_alerts(tmp_path, client):
     assert client.post("/api/certificates/check").status_code == 200
     # No mail server configured, so the test email is refused with a clear message.
     r = client.post("/api/certificates/test-email")
-    assert r.status_code == 502 and "CLOUDTEC_SMTP_HOST" in r.json()["detail"]
+    assert r.status_code == 502 and "KASTEC_SMTP_HOST" in r.json()["detail"]
 
 
 def test_operators_see_alerts_but_not_settings(tmp_path, client):
@@ -407,7 +407,7 @@ def test_command_line(tmp_path, capsys):
     assert certwatch.main(["--data-dir", str(tmp_path)]) == 0
     tls.make_own_ca_cert(tmp_path, ["pc01"], ["127.0.0.1"], days=15)
     assert certwatch.main(["--data-dir", str(tmp_path)]) == 2
-    assert "CloudTec (this server): expires" in capsys.readouterr().out
+    assert "KasTec (this server): expires" in capsys.readouterr().out
 
 
 # --- public certificate logs -----------------------------------------------------

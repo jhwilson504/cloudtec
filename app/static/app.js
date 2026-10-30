@@ -23,7 +23,7 @@ async function api(method, path, body) {
     });
   } catch {
     // The browser couldn't reach the server at all, usually because its window was closed.
-    throw new Error("Can't reach CloudTec. It may have stopped: start it again with Start CloudTec, then retry.");
+    throw new Error("Can't reach KasTec. It may have stopped: start it again with Start KasTec, then retry.");
   }
   if (res.status === 401 && path !== "/api/login") {
     showLogin();
@@ -125,7 +125,7 @@ const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC 
 function noConnections(kind) {
   const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC" }[kind];
   const article = kind === "idrac" ? "an" : "a";
-  if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a CloudTec administrator to add one.</p></div>`;
+  if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a KasTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
     <a class="btn primary" href="#/connections" onclick="state.connKind='${kind}'">Add ${article} ${label}</a></div>`;
 }
@@ -235,7 +235,7 @@ async function renderDashboard() {
   const [items, certs] = await Promise.all([api("GET", "/api/dashboard"), api("GET", "/api/certificates").catch(() => null)]);
   const banner = certBanner(certs);
   if (!items.length) {
-    view.innerHTML = `${banner}<div class="page-head"><div><h1>Welcome to CloudTec Center</h1>
+    view.innerHTML = `${banner}<div class="page-head"><div><h1>Welcome to KasTec Center</h1>
       <p class="muted">Connect your Active Directory domains, vCenter servers and iDRACs to manage them from one place.</p></div></div>
       <div class="grid">${certTile(certs)}${noConnections("ad")}${noConnections("vsphere")}${noConnections("idrac")}${resetTile()}${powershellTile()}</div>`;
     return;
@@ -416,11 +416,11 @@ function certForm(c) {
   return `<div class="card section" id="certs"><h2>What to watch</h2>
     <p class="muted" style="margin-top:0">Alerts show on this page and the dashboard${c.email
       ? ", and are emailed to the addresses below."
-      : ". To get them by email too, set <code>CLOUDTEC_SMTP_HOST</code> to your mail server and restart CloudTec."}</p>
+      : ". To get them by email too, set <code>KASTEC_SMTP_HOST</code> to your mail server and restart KasTec."}</p>
     <form id="cert-form" class="form">
       <label class="full"><span>Certificates to watch, one per line: a host name or IP (add <code>:port</code> if not 443) or a
         certificate file path, then the owners' email addresses, then <code># a note</code>.
-        Public names CloudTec can't connect to are looked up in the public certificate logs; start a line with <code>ct:</code> to always do that.</span>
+        Public names KasTec can't connect to are looked up in the public certificate logs; start a line with <code>ct:</code> to always do that.</span>
         <textarea name="targets" rows="8" spellcheck="false" placeholder="btcme1.btcbahamas.com  javaughn.davis@btcbahamas.com  # mail
 10.255.215.121  # OCS dashboard
 C:\\certs\\trailmail.cer">${esc(certLines(c.config.targets))}</textarea></label>
@@ -474,7 +474,7 @@ function powershellTile() {
   if (!isAdmin()) return "";
   return `<a class="card tool-tile" href="#/powershell">
     <img src="/static/powershell.svg" alt="" width="56" height="56">
-    <div><b>PowerShell</b><div class="muted">Run PowerShell commands on this computer, right inside CloudTec.</div></div>
+    <div><b>PowerShell</b><div class="muted">Run PowerShell commands on this computer, right inside KasTec.</div></div>
   </a>`;
 }
 
@@ -918,7 +918,7 @@ async function renderConnections() {
   });
   view.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
     const c = conns[b.dataset.del];
-    if (!(await confirmAction("Remove connection", `Remove <b>${esc(c.name)}</b> and its saved password from CloudTec? Nothing changes on the server itself.`, "Remove", true))) return;
+    if (!(await confirmAction("Remove connection", `Remove <b>${esc(c.name)}</b> and its saved password from KasTec? Nothing changes on the server itself.`, "Remove", true))) return;
     await api("DELETE", `/api/connections/${c.id}`);
     toast(`Removed ${c.name}`);
     renderConnections();
@@ -1033,7 +1033,7 @@ async function renderDCs() {
           <td style="white-space:nowrap">${portBadges(d)}</td>
           <td>${fmtDate(d.last_logon)}</td></tr>`), "No domain controllers found.")}
         <p class="muted small-note">Ports: ${Object.entries(ports).map(([p, l]) => `${p} ${esc(l)}`).join(" · ")}.
-          Green means the computer running CloudTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;
+          Green means the computer running KasTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;
     } catch (err) {
       box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
     }
@@ -1145,7 +1145,7 @@ async function renderShell() {
     : `<p class="muted">Add an Active Directory or vCenter on the <a href="#/connections">Connections</a> page to sign this session in to it with one click.</p>`;
   const head = `<div class="page-head"><div class="row" style="gap:12px">
       <img src="/static/powershell.svg" alt="" width="40" height="40">
-      <div><h1>PowerShell</h1><p class="muted" style="margin:0">Commands run on the computer CloudTec is running on, as the user who started it.</p></div>
+      <div><h1>PowerShell</h1><p class="muted" style="margin:0">Commands run on the computer KasTec is running on, as the user who started it.</p></div>
     </div>${s.available ? '<div class="row"><button class="btn" id="sh-clear">Clear screen</button><button class="btn" id="sh-reset">Restart session</button></div>' : ""}</div>`;
   if (!s.available) {
     view.innerHTML = `${head}<div class="notice">${esc(s.reason)}</div>`;
@@ -1172,7 +1172,7 @@ async function renderShell() {
   };
   const draw = () => {
     out.textContent = "";
-    if (!shellLog.length) append("PowerShell inside CloudTec. Pick a connection above and click Connect, then try Get-ADUser -Filter * or Get-VM.\n\n", "term-dim");
+    if (!shellLog.length) append("PowerShell inside KasTec. Pick a connection above and click Connect, then try Get-ADUser -Filter * or Get-VM.\n\n", "term-dim");
     for (const e of shellLog) {
       append(`PS ${e.cwd}> `, "term-prompt");
       append(e.command + "\n");
@@ -1222,7 +1222,7 @@ async function renderShell() {
 
   $("#sh-connect")?.addEventListener("click", () => {
     const c = real.find((x) => x.id === $("#sh-conn").value);
-    send(`# Connect to ${c.name} with the credentials saved in CloudTec`, "/api/shell/connect", { connection_id: c.id });
+    send(`# Connect to ${c.name} with the credentials saved in KasTec`, "/api/shell/connect", { connection_id: c.id });
   });
   term.addEventListener("click", () => { if (!window.getSelection().toString()) input.focus(); });
   $("#sh-clear").onclick = () => { shellLog.length = 0; draw(); input.focus(); };
@@ -1285,7 +1285,7 @@ async function renderUsers() {
       <button class="btn small danger" data-u="delete" data-i="${i}">Delete</button>`}</td></tr>`);
 
   view.innerHTML = `<div class="page-head"><div><h1>Users</h1>
-      <p class="muted" style="margin:0">People who can sign in to CloudTec. Each person gets their own account, so the activity log shows who did what.</p></div></div>
+      <p class="muted" style="margin:0">People who can sign in to KasTec. Each person gets their own account, so the activity log shows who did what.</p></div></div>
     ${table(["User", "Role", "Status", "Added", ""], rows)}
     <div class="card section"><h2>Add a user</h2>
       <form id="user-form" class="form" autocomplete="off">
@@ -1305,7 +1305,7 @@ async function renderUsers() {
         <td>${e.action.startsWith("sign-in failed") ? `<span class="badge bad">${esc(e.action)}</span>` : esc(e.action)}</td>
         <td title="${esc(e.target || "")}">${esc(shortDn(e.target)) || '<span class="muted">–</span>'}</td>
         <td>${esc(e.connection || "")}</td></tr>`), "Nothing recorded yet.")}
-      <p class="muted small-note">The full log is in <code>data\\audit.log</code> in the CloudTec folder.</p></div>`;
+      <p class="muted small-note">The full log is in <code>data\\audit.log</code> in the KasTec folder.</p></div>`;
 
   const form = $("#user-form");
   const readPw = bindNewPassword(form);
@@ -1328,7 +1328,7 @@ async function renderUsers() {
     const name = esc(u.display_name || u.username);
     try {
       if (b.dataset.u === "pw") {
-        modal(`<h2>Reset password</h2><p>New CloudTec password for <b>${name}</b>. They'll be signed out everywhere.</p>
+        modal(`<h2>Reset password</h2><p>New KasTec password for <b>${name}</b>. They'll be signed out everywhere.</p>
           <form id="upw-form" style="display:grid;gap:12px">${newPasswordFields()}<p class="error" id="upw-err"></p>
           <div class="modal-actions"><button type="button" class="btn" data-close>Cancel</button>
           <button class="btn primary" type="submit">Set password</button></div></form>`);
@@ -1353,7 +1353,7 @@ async function renderUsers() {
         if (!u.disabled && !(await confirmAction("Disable user", `Disable <b>${name}</b>? They'll be signed out and can't sign in until you enable them again.`, "Disable", true))) return;
         await api("PATCH", `/api/users/${encodeURIComponent(u.username)}`, { disabled: !u.disabled });
       } else if (b.dataset.u === "delete") {
-        if (!(await confirmAction("Delete user", `Delete <b>${name}</b>'s CloudTec account? Their entries in the activity log are kept.`, "Delete", true))) return;
+        if (!(await confirmAction("Delete user", `Delete <b>${name}</b>'s KasTec account? Their entries in the activity log are kept.`, "Delete", true))) return;
         await api("DELETE", `/api/users/${encodeURIComponent(u.username)}`);
       }
       renderUsers();
@@ -1367,8 +1367,8 @@ async function renderSettings() {
   loading();
   const s = await api("GET", "/api/settings");
   const body = s.password_from_env
-    ? `<div class="notice">The admin password is set by the <code>CLOUDTEC_ADMIN_PASSWORD</code> environment variable,
-        so it can't be changed here. Remove that variable and restart CloudTec, then sign in with the
+    ? `<div class="notice">The admin password is set by the <code>KASTEC_ADMIN_PASSWORD</code> environment variable,
+        so it can't be changed here. Remove that variable and restart KasTec, then sign in with the
         same password and change it on this page.</div>`
     : `<form id="pw-change" class="form" style="max-width:640px">
         <label class="full">Current password <input type="password" name="current" required autocomplete="current-password"></label>
@@ -1382,16 +1382,16 @@ async function renderSettings() {
   const cert = net?.certificate;
   const netCard = !net ? "" : `<div class="card section"><h2>Network access</h2>
     ${net.enabled && cert
-      ? `<div class="notice ok">Colleagues can use CloudTec over HTTPS at
+      ? `<div class="notice ok">Colleagues can use KasTec over HTTPS at
            ${cert.names.filter((n) => n !== "localhost" && !n.startsWith("127.")).map((n) => `<b>https://${esc(n)}:${net.port}</b>`).join(", ")}</div>
          <dl class="kv" style="margin-top:12px">
            <dt>Certificate</dt><dd>${esc(cert.subject)}</dd>
-           <dt>Issued by</dt><dd>${esc(cert.issuer)}${cert.own_ca ? ' <span class="badge warn">CloudTec\'s own CA</span>' : ""}</dd>
+           <dt>Issued by</dt><dd>${esc(cert.issuer)}${cert.own_ca ? ' <span class="badge warn">KasTec\'s own CA</span>' : ""}</dd>
            <dt>Expires</dt><dd>${esc(new Date(cert.expires).toLocaleDateString())}</dd></dl>
-         ${cert.own_ca ? `<p class="muted small-note">Colleagues' PCs must trust <code>data\\tls\\CloudTec-CA.cer</code> once (Group Policy, or double-click it on each PC).</p>` : ""}`
-      : `<p class="muted" style="margin-top:0">CloudTec is only reachable on this PC. To let colleagues use it from their own PCs over HTTPS,
-           double-click <b>Set up network access</b> in the CloudTec folder.</p>`}
-    <p class="muted small-note">To change this, run <b>Set up network access</b> in the CloudTec folder, then restart CloudTec with <b>Start CloudTec</b>.</p></div>`;
+         ${cert.own_ca ? `<p class="muted small-note">Colleagues' PCs must trust <code>data\\tls\\KasTec-CA.cer</code> once (Group Policy, or double-click it on each PC).</p>` : ""}`
+      : `<p class="muted" style="margin-top:0">KasTec is only reachable on this PC. To let colleagues use it from their own PCs over HTTPS,
+           double-click <b>Set up network access</b> in the KasTec folder.</p>`}
+    <p class="muted small-note">To change this, run <b>Set up network access</b> in the KasTec folder, then restart KasTec with <b>Start KasTec</b>.</p></div>`;
   view.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
     <div class="card"><h2>Your password</h2>${body}</div>${netCard}`;
 

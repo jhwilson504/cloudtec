@@ -1,4 +1,4 @@
-"""CloudTec Center: one console for Active Directory, vSphere and iDRAC."""
+"""KasTec Center: one console for Active Directory, vSphere and iDRAC."""
 
 import json
 import logging
@@ -110,7 +110,7 @@ def _clean_config(kind: str, config: dict) -> dict:
     return out
 
 
-# Ports checked on each domain controller, from the computer CloudTec runs on.
+# Ports checked on each domain controller, from the computer KasTec runs on.
 DC_PORTS = {389: "LDAP", 636: "LDAPS", 3268: "Global Catalog", 9389: "AD Web Services"}
 
 
@@ -158,7 +158,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if shell:
             shell.close()
 
-    app = FastAPI(title="CloudTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json",
+    app = FastAPI(title="KasTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json",
                   lifespan=lifespan)
 
     @app.exception_handler(ConnectorError)
@@ -444,8 +444,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not to:
             raise HTTPException(400, "Add at least one email address to send alerts to.")
         try:
-            certwatch.send_email(settings, to, "CloudTec test: certificate alerts",
-                                 "Certificate expiry alerts from CloudTec will arrive at this address.\n")
+            certwatch.send_email(settings, to, "KasTec test: certificate alerts",
+                                 "Certificate expiry alerts from KasTec will arrive at this address.\n")
         except (OSError, smtplib.SMTPException, certwatch.WatchError) as e:
             raise HTTPException(502, f"Couldn't send the email: {e}")
         audit(request, "certificates.test-email", ", ".join(to))
@@ -516,10 +516,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Whether the PowerShell page may be used from this browser, and if not, why."""
         local = request.client is not None and request.client.host in local_addresses
         if settings.shell == "off":
-            reason = "The PowerShell page is turned off (CLOUDTEC_SHELL=off)."
+            reason = "The PowerShell page is turned off (KASTEC_SHELL=off)."
         elif settings.shell != "on" and not local:
-            reason = ("For safety, PowerShell only works in a browser on the computer CloudTec runs on. "
-                      "Set CLOUDTEC_SHELL=on to allow it from other computers.")
+            reason = ("For safety, PowerShell only works in a browser on the computer KasTec runs on. "
+                      "Set KASTEC_SHELL=on to allow it from other computers.")
         elif not shell:
             reason = "PowerShell wasn't found on this computer."
         else:

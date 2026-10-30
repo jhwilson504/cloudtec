@@ -6,7 +6,7 @@ plus any users an administrator adds (stored hashed in the database, see
 store.py). Where the built-in admin's password comes from, in order of
 precedence:
 
-1. CLOUDTEC_ADMIN_PASSWORD. It can't be changed from the UI while set.
+1. KASTEC_ADMIN_PASSWORD. It can't be changed from the UI while set.
 2. <data_dir>/admin_password.hash, written when the password is changed in the UI.
 3. <data_dir>/admin_password, a plain-text file. It is generated on first start
    (mode 0600) and can also be edited by hand. Changing the password in the UI
@@ -89,7 +89,7 @@ class AdminPassword:
     def change(self, current: str, new: str) -> None:
         if self.from_env:
             raise PasswordError(
-                "The password is set by CLOUDTEC_ADMIN_PASSWORD. Remove that setting to change it here."
+                "The password is set by KASTEC_ADMIN_PASSWORD. Remove that setting to change it here."
             )
         if not self.check(current):
             raise PasswordError("Current password is incorrect")

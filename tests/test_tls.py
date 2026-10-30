@@ -41,7 +41,7 @@ def test_own_ca(tmp_path):
     assert cert.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value == \
         x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH])
     assert ca.extensions.get_extension_for_class(x509.BasicConstraints).value.ca is True
-    assert x509.load_der_x509_certificate((d / "CloudTec-CA.cer").read_bytes()) == ca
+    assert x509.load_der_x509_certificate((d / "KasTec-CA.cer").read_bytes()) == ca
     if os.name != "nt":
         assert oct((d / "key.pem").stat().st_mode)[-3:] == "600"
         assert oct((d / "ca-key.pem").stat().st_mode)[-3:] == "600"
@@ -168,3 +168,11 @@ def test_https_server_end_to_end(tmp_path):
         proc.terminate()
         out = proc.communicate(timeout=10)[0].decode()
     assert f"https://localhost:{port}" in out
+
+
+def test_ca_made_before_rename_gets_kastec_cer(tmp_path):
+    tls.make_own_ca_cert(tmp_path, NAMES, IPS)
+    d = tmp_path / "tls"
+    (d / "KasTec-CA.cer").rename(d / "CloudTec-CA.cer")     # what an older version left behind
+    tls.make_own_ca_cert(tmp_path, NAMES, IPS)
+    assert (d / "KasTec-CA.cer").read_bytes() == (d / "CloudTec-CA.cer").read_bytes()

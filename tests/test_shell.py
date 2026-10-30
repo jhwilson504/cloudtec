@@ -66,7 +66,7 @@ def test_local_mode_refuses_remote_browsers(tmp_path):
     # TestClient's client address is "testclient", i.e. not this computer.
     with make_client(tmp_path, "local") as c:
         s = c.get("/api/shell").json()
-        assert s["available"] is False and "computer CloudTec runs on" in s["reason"]
+        assert s["available"] is False and "computer KasTec runs on" in s["reason"]
         assert c.post("/api/shell/run", json={"command": "Get-Date"}).status_code == 403
 
 
@@ -127,8 +127,8 @@ def test_connect_ad_without_module_keeps_credential(session, tmp_path):
     r = session.run(connect_script(conn("ad")), log_as="[connect] Corp")
     assert "ActiveDirectory PowerShell module isn't installed" in r["output"]
     assert TRICKY_PASSWORD not in r["output"]
-    assert session.run("$CloudTec['Corp $prod'].Credential.GetNetworkCredential().Password")["output"] == TRICKY_PASSWORD
-    assert session.run("$CloudTec['Corp $prod'].Server")["output"] == "dc01.corp.example.com"
+    assert session.run("$KasTec['Corp $prod'].Credential.GetNetworkCredential().Password")["output"] == TRICKY_PASSWORD
+    assert session.run("$KasTec['Corp $prod'].Server")["output"] == "dc01.corp.example.com"
     assert session.run("Test-Path variable:__cred")["output"] == "False"
     history = (tmp_path / "history.log").read_text()
     assert "[connect] Corp" in history and "ecret" not in history

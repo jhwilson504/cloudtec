@@ -1,4 +1,4 @@
-"""Start CloudTec: on this PC only (http://localhost:8000), or on the network over
+"""Start KasTec: on this PC only (http://localhost:8000), or on the network over
 HTTPS once "Set up network access" has been run (see tls.py).
 
     python -m app.run [--open-browser]
@@ -14,6 +14,7 @@ import webbrowser
 from pathlib import Path
 
 from .tls import CERT, KEY, cert_summary, read_network
+from .config import env
 
 LOCAL_PORT = 8000
 
@@ -39,16 +40,16 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--open-browser", action="store_true")
     args = p.parse_args(argv)
 
-    data_dir = Path(os.environ.get("CLOUDTEC_DATA_DIR", "data"))
+    data_dir = Path(env("DATA_DIR", "data"))
     data_dir.mkdir(parents=True, exist_ok=True)
     opts = server_options(data_dir)
     if opts["tls"]:
-        os.environ["CLOUDTEC_SECURE_COOKIES"] = "true"  # sign-in cookies only ever travel encrypted
+        os.environ["KASTEC_SECURE_COOKIES"] = "true"  # sign-in cookies only ever travel encrypted
 
-    print(f"\n  CloudTec Center is starting at {opts['url']}")
+    print(f"\n  KasTec Center is starting at {opts['url']}")
     if opts["tls"]:
         print(f"  Colleagues can open https://<this PC's name>:{opts['port']}")
-    print("\n  Keep this window open while you use CloudTec. Close it to stop CloudTec.\n")
+    print("\n  Keep this window open while you use KasTec. Close it to stop KasTec.\n")
     if args.open_browser:
         threading.Timer(3, webbrowser.open, args=[opts["url"]]).start()
 

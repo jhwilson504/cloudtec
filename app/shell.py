@@ -140,13 +140,13 @@ AD_MISSING = """The ActiveDirectory PowerShell module isn't installed on this co
 Install it once from an Administrator PowerShell window:
     Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0
 (On Windows Server: Install-WindowsFeature RSAT-AD-PowerShell)
-Then click Connect again. The saved credential is already available as $CloudTec[{name}].Credential."""
+Then click Connect again. The saved credential is already available as $KasTec[{name}].Credential."""
 
 VC_MISSING = """VMware PowerCLI isn't installed on this computer.
 Install it once (no Administrator needed):
     Install-Module VCF.PowerCLI -Scope CurrentUser
 (Older name: VMware.PowerCLI.) Then click Connect again.
-The saved credential is already available as $CloudTec[{name}].Credential."""
+The saved credential is already available as $KasTec[{name}].Credential."""
 
 
 def connect_script(conn) -> str:
@@ -183,10 +183,10 @@ def connect_script(conn) -> str:
   }} else {{
     {ps_quote(VC_MISSING.replace("{name}", name))}
   }}"""
-    return f"""if (-not $global:CloudTec) {{ $global:CloudTec = @{{}} }}
+    return f"""if (-not $global:KasTec) {{ $global:KasTec = @{{}} }}
 try {{
   $__cred = New-Object System.Management.Automation.PSCredential({ps_quote(user)}, (ConvertTo-SecureString {ps_quote(conn.secret)} -AsPlainText -Force))
-  $global:CloudTec[{name}] = @{{ Server = {ps_quote(host)}; Credential = $__cred }}{body}
+  $global:KasTec[{name}] = @{{ Server = {ps_quote(host)}; Credential = $__cred }}{body}
 }} finally {{
   Remove-Variable __cred -ErrorAction SilentlyContinue
 }}"""
