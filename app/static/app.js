@@ -761,11 +761,15 @@ async function renderVSphere() {
   if (!conns.length) { view.innerHTML = `<div class="page-head"><h1>vSphere</h1></div>${noConnections("vsphere")}`; return; }
   if (!conns.some((c) => c.id === state.vs)) state.vs = conns[0].id;
 
-  const tabs = [["vms", "Virtual machines"], ["hosts", "Hosts"], ["datastores", "Datastores"], ["clusters", "Clusters"]];
+  const tabs = [["topology", "Topology"], ["vms", "Virtual machines"], ["hosts", "Hosts"], ["datastores", "Datastores"], ["clusters", "Clusters"]];
+  const topo = state.vsTab === "topology";
   view.innerHTML = `<div class="page-head"><div><h1>vSphere</h1></div></div>
     <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${state.vsTab === k ? "active" : ""}">${l}</button>`).join("")}</div>
     <div class="toolbar">${connectionPicker(conns, state.vs, "vs-conn")}
       ${state.vsTab === "vms" ? '<input type="search" id="vs-q" placeholder="Search VMs…">' : ""}
+      ${topo ? `<input type="search" id="topo-q" placeholder="Find a VM, host or cluster…">
+        <button class="btn" id="topo-open">Expand all</button><button class="btn" id="topo-close">Collapse all</button>
+        <button class="btn" id="topo-csv">Export CSV</button><button class="btn" id="topo-print">Print / PDF</button>` : ""}
       <button class="btn" id="vs-refresh">Refresh</button>
       <span class="muted" id="vs-count"></span></div>
     <div id="vs-results"><p class="muted">Loading…</p></div>`;
@@ -778,6 +782,13 @@ async function renderVSphere() {
   async function load() {
     const q = $("#vs-q")?.value.trim() ?? "";
     const box = $("#vs-results");
+    if (topo) {
+      box.innerHTML = '<p class="muted">Reading the whole inventory from vCenter…</p>';
+      try {
+        showTopology(box, await api("GET", `/api/vsphere/${state.vs}/topology`), conns.find((c) => c.id === state.vs));
+      } catch (err) { box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+      return;
+    }
     try {
       const items = await api("GET", `/api/vsphere/${state.vs}/${state.vsTab}${state.vsTab === "vms" ? `?q=${encodeURIComponent(q)}` : ""}`);
       $("#vs-count").textContent = `${items.length} result${items.length === 1 ? "" : "s"}`;
@@ -789,6 +800,131 @@ async function renderVSphere() {
     }
   }
   load();
+}
+
+// ---- vSphere topology ------------------------------------------------------
+
+const gb = (mb) => (mb ? `${Math.round(mb / 1024)} GB` : "–");
+
+function topologyCounts(t) {
+  const dcs = t.datacenters;
+  const hosts = dcs.flatMap((d) => [...d.clusters.flatMap((c) => c.hosts), ...d.standalone_hosts]);
+  const vms = [...hosts.flatMap((h) => h.vms), ...dcs.flatMap((d) => d.other_vms)];
+  const stores = dcs.flatMap((d) => d.datastores);
+  return {
+    dcs, hosts, vms, stores,
+    clusters: dcs.reduce((n, d) => n + d.clusters.length, 0),
+    networks: dcs.reduce((n, d) => n + d.networks.length, 0),
+    capacity: stores.reduce((n, s) => n + (s.capacity || 0), 0),
+    free: stores.reduce((n, s) => n + (s.free_space || 0), 0),
+  };
+}
+
+function showTopology(box, t, conn) {
+  const n = topologyCounts(t);
+  const stat = (label, value, sub = "") =>
+    `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+  const on = (vms) => vms.filter((v) => v.power_state === "POWERED_ON").length;
+  const onOff = (flag, label) => `<span class="badge ${flag ? "ok" : "plain"}">${label} ${flag ? "on" : "off"}</span>`;
+  const kind = (k) => `<span class="tk tk-${k}">${{ vc: "vCenter", dc: "Datacenter", cl: "Cluster", host: "Host", vm: "VM", ds: "Datastores", net: "Networks", grp: "Group" }[k]}</span>`;
+
+  const draw = (q) => {
+    q = q.trim().toLowerCase();
+    const hit = (name) => !q || (name || "").toLowerCase().includes(q);
+    const vmLi = (v) => `<li>${powerBadge(v.power_state)} <b>${esc(v.name)}</b>
+      <span class="muted">${v.cpus ?? "–"} vCPU · ${gb(v.memory_mb)}</span></li>`;
+    // A search keeps a host if it or any of its VMs match; a matching cluster or host shows everything under it.
+    const host = (h, all = false) => {
+      const whole = all || hit(h.name);
+      const vms = whole ? h.vms : h.vms.filter((v) => hit(v.name));
+      if (q && !whole && !vms.length) return "";
+      const ok = h.connection_state === "CONNECTED";
+      return `<details class="topo-node" ${q ? "open" : ""}><summary>${kind("host")} <b>${esc(h.name)}</b>
+          <span class="badge ${ok ? "ok" : "bad"}">${esc(h.connection_state || "?")}</span>
+          <span class="muted">${h.vms.length} VM${h.vms.length === 1 ? "" : "s"} · ${on(h.vms)} on</span></summary>
+        ${vms.length ? `<ul class="topo-vms">${vms.map(vmLi).join("")}</ul>` : '<p class="muted topo-empty">No VMs</p>'}</details>`;
+    };
+    const cluster = (c) => {
+      const inner = c.hosts.map((h) => host(h, Boolean(q) && hit(c.name))).join("");
+      if (q && !inner && !hit(c.name)) return "";
+      const vms = c.hosts.flatMap((h) => h.vms);
+      return `<details class="topo-node" open><summary>${kind("cl")} <b>${esc(c.name)}</b> ${onOff(c.ha_enabled, "HA")} ${onOff(c.drs_enabled, "DRS")}
+          <span class="muted">${c.hosts.length} host${c.hosts.length === 1 ? "" : "s"} · ${vms.length} VMs · ${on(vms)} on</span></summary>
+        ${inner || '<p class="muted topo-empty">No hosts</p>'}</details>`;
+    };
+    const dc = (d) => {
+      const clusters = d.clusters.map(cluster).join("");
+      const standalone = d.standalone_hosts.map(host).join("");
+      const other = d.other_vms.filter((v) => hit(v.name));
+      if (q && !clusters && !standalone && !other.length) return "";
+      const free = d.datastores.reduce((s, x) => s + (x.free_space || 0), 0), cap = d.datastores.reduce((s, x) => s + (x.capacity || 0), 0);
+      return `<details class="topo-node" open><summary>${kind("dc")} <b>${esc(d.name)}</b>
+          <span class="muted">${d.clusters.length} clusters · ${d.clusters.reduce((s, c) => s + c.hosts.length, 0) + d.standalone_hosts.length} hosts</span></summary>
+        ${clusters}
+        ${standalone ? `<details class="topo-node" open><summary>${kind("grp")} <b>Standalone hosts</b> <span class="muted">not in a cluster</span></summary>${standalone}</details>` : ""}
+        ${other.length ? `<details class="topo-node" open><summary>${kind("grp")} <b>VMs not on any host</b> <span class="muted">orphaned or inaccessible</span></summary>
+            <ul class="topo-vms">${other.map(vmLi).join("")}</ul></details>` : ""}
+        ${q ? "" : `<details class="topo-node"><summary>${kind("ds")} <b>${d.datastores.length} datastores</b>
+            <span class="muted">${fmtBytes(free)} free of ${fmtBytes(cap)}</span></summary>
+          <ul class="topo-vms">${d.datastores.map((x) => {
+            const used = x.capacity ? (1 - x.free_space / x.capacity) * 100 : 0;
+            return `<li><b>${esc(x.name)}</b> <span class="badge plain">${esc(x.type || "")}</span>
+              <span class="muted">${fmtBytes(x.free_space)} free of ${fmtBytes(x.capacity)}</span>
+              <span class="meter topo-meter ${used > 85 ? "hot" : ""}"><span style="width:${used.toFixed(1)}%"></span></span></li>`;
+          }).join("")}</ul></details>
+          <details class="topo-node"><summary>${kind("net")} <b>${d.networks.length} networks</b></summary>
+          <ul class="topo-vms">${d.networks.map((x) => `<li><b>${esc(x.name)}</b>
+            <span class="badge ${x.type === "DISTRIBUTED_PORTGROUP" ? "info" : "plain"}">${x.type === "DISTRIBUTED_PORTGROUP" ? "Distributed" : x.type === "STANDARD_PORTGROUP" ? "Standard" : esc(x.type || "")}</span></li>`).join("")}</ul></details>`}
+      </details>`;
+    };
+    const tree = n.dcs.map(dc).join("");
+    $("#topo-tree").innerHTML = `<div class="topo-root">${kind("vc")} <b>${esc(t.vcenter)}</b>
+        <span class="muted">${esc(conn?.name || "")}</span></div>${tree || `<p class="muted">${q ? "Nothing matches." : "No datacenters."}</p>`}`;
+  };
+
+  box.innerHTML = `<div class="stats">
+      ${stat("Datacenters", n.dcs.length)}
+      ${stat("Clusters", n.clusters)}
+      ${stat("ESXi hosts", n.hosts.length, `${n.hosts.filter((h) => h.connection_state === "CONNECTED").length} connected`)}
+      ${stat("Virtual machines", n.vms.length, `${on(n.vms)} powered on`)}
+      ${stat("Datastores", n.stores.length, `${fmtBytes(n.free)} free of ${fmtBytes(n.capacity)}`)}
+      ${stat("Networks", n.networks)}
+    </div>
+    <div class="card topo" id="topo-tree"></div>
+    <p class="muted small-note">Read from ${esc(t.vcenter)} on ${esc(new Date().toLocaleString())}.</p>`;
+  draw("");
+
+  $("#topo-q").oninput = debounce((e) => draw(e.target.value), 200);
+  $("#topo-open").onclick = () => box.querySelectorAll("details").forEach((d) => (d.open = true));
+  $("#topo-close").onclick = () => box.querySelectorAll("details details").forEach((d) => (d.open = false));
+  $("#topo-print").onclick = () => { box.querySelectorAll("details").forEach((d) => (d.open = true)); window.print(); };
+  $("#topo-csv").onclick = () => downloadTopologyCsv(t);
+}
+
+function downloadTopologyCsv(t) {
+  const rows = [["Object", "Datacenter", "Cluster", "Host", "Name", "State", "vCPU", "Memory (GB)", "Type", "Capacity (GB)", "Free (GB)"]];
+  const toGb = (b) => (b == null ? "" : (b / 1024 ** 3).toFixed(1));
+  for (const d of t.datacenters) {
+    const hostRows = (cluster, h) => {
+      rows.push(["Host", d.name, cluster, h.name, h.name, h.connection_state || "", "", "", "", "", ""]);
+      for (const v of h.vms) rows.push(["VM", d.name, cluster, h.name, v.name, v.power_state || "", v.cpus ?? "",
+        v.memory_mb ? (v.memory_mb / 1024).toFixed(1) : "", "", "", ""]);
+    };
+    for (const c of d.clusters) {
+      rows.push(["Cluster", d.name, c.name, "", c.name, `HA ${c.ha_enabled ? "on" : "off"}, DRS ${c.drs_enabled ? "on" : "off"}`, "", "", "", "", ""]);
+      c.hosts.forEach((h) => hostRows(c.name, h));
+    }
+    d.standalone_hosts.forEach((h) => hostRows("(standalone)", h));
+    for (const v of d.other_vms) rows.push(["VM", d.name, "", "(no host)", v.name, v.power_state || "", v.cpus ?? "", "", "", "", ""]);
+    for (const x of d.datastores) rows.push(["Datastore", d.name, "", "", x.name, "", "", "", x.type || "", toGb(x.capacity), toGb(x.free_space)]);
+    for (const x of d.networks) rows.push(["Network", d.name, "", "", x.name, "", "", "", x.type || "", "", ""]);
+  }
+  const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));
+  a.download = `vsphere-topology-${t.vcenter}-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 }
 
 function vmActionButtons(v, i) {

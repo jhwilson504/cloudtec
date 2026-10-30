@@ -258,6 +258,30 @@ class DemoVSphere:
     def clusters(self) -> list[dict]:
         return [dict(c) for c in self.data["clusters"]]
 
+    def topology(self) -> dict:
+        """Prod-Cluster (esx01-02), Lab-Cluster (esx03), and esx04 as a disconnected standalone host."""
+        hosts = {h["name"]: dict(h) for h in self.data["hosts"]}
+        running = ["esx01.lab.local", "esx02.lab.local", "esx03.lab.local"]
+        placement = {name: [] for name in hosts}
+        keys = ("id", "name", "power_state", "cpus", "memory_mb")
+        for i, v in enumerate(sorted(self.data["vms"], key=lambda v: v["name"].lower())):
+            target = "esx03.lab.local" if v["name"].startswith(("lab-", "template")) else running[i % 2]
+            placement[target].append({k: v[k] for k in keys})
+        node = lambda name: {**hosts[name], "vms": placement[name]}  # noqa: E731
+        clusters = {c["name"]: dict(c) for c in self.data["clusters"]}
+        return {"vcenter": "vcenter.lab.local", "datacenters": [{
+            "id": "datacenter-3", "name": "Nassau-DC",
+            "clusters": [{**clusters["Lab-Cluster"], "hosts": [node("esx03.lab.local")]},
+                         {**clusters["Prod-Cluster"], "hosts": [node("esx01.lab.local"), node("esx02.lab.local")]}],
+            "standalone_hosts": [node("esx04.lab.local")],
+            "other_vms": [],
+            "datastores": [dict(d) for d in self.data["datastores"]],
+            "networks": [{"id": "network-11", "name": "Management Network", "type": "STANDARD_PORTGROUP"},
+                         {"id": "dvportgroup-21", "name": "Servers-VLAN20", "type": "DISTRIBUTED_PORTGROUP"},
+                         {"id": "dvportgroup-22", "name": "Users-VLAN30", "type": "DISTRIBUTED_PORTGROUP"},
+                         {"id": "network-12", "name": "VM Network", "type": "STANDARD_PORTGROUP"}],
+        }]}
+
     def power(self, vm_id: str, action: str) -> None:
         v = self._vm(vm_id)
         if action not in POWER_ACTIONS | GUEST_ACTIONS:

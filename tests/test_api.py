@@ -253,3 +253,12 @@ def test_idrac_hosts_are_cleaned(client):
     r = client.post("/api/connections", json={"kind": "idrac", "name": "r", "password": "pw",
                                               "config": {"hosts": ["bad host/x"], "username": "root"}})
     assert r.status_code == 422
+
+
+def test_vsphere_topology_endpoint(client):
+    vs = add_demo(client, "vsphere", "Lab")
+    t = client.get(f"/api/vsphere/{vs}/topology").json()
+    [dc] = t["datacenters"]
+    hosts = [h for c in dc["clusters"] for h in c["hosts"]] + dc["standalone_hosts"]
+    assert sum(len(h["vms"]) for h in hosts) == len(client.get(f"/api/vsphere/{vs}/vms").json())
+    assert dc["datastores"] and dc["networks"]

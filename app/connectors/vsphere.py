@@ -174,6 +174,47 @@ class VSphereConnector:
             for c in self._get("/api/vcenter/cluster")
         ]
 
+    def topology(self) -> dict:
+        """vCenter > datacenters > clusters > hosts > VMs, plus each datacenter's datastores and networks."""
+        def vm(v):
+            return {"id": v["vm"], "name": v["name"], "power_state": v.get("power_state"),
+                    "cpus": v.get("cpu_count"), "memory_mb": v.get("memory_size_MiB")}
+
+        placed: set[str] = set()
+
+        def host(h):
+            vms = [vm(v) for v in self._get("/api/vcenter/vm", hosts=h["host"])]
+            placed.update(v["id"] for v in vms)
+            return {"id": h["host"], "name": h["name"], "connection_state": h.get("connection_state"),
+                    "power_state": h.get("power_state"), "vms": sorted(vms, key=lambda v: v["name"].lower())}
+
+        datacenters = []
+        for dc in sorted(self._get("/api/vcenter/datacenter"), key=lambda d: d["name"].lower()):
+            dc_id = dc["datacenter"]
+            clustered: set[str] = set()
+            clusters = []
+            for c in sorted(self._get("/api/vcenter/cluster", datacenters=dc_id), key=lambda c: c["name"].lower()):
+                hosts = sorted(self._get("/api/vcenter/host", clusters=c["cluster"]), key=lambda h: h["name"].lower())
+                clustered.update(h["host"] for h in hosts)
+                clusters.append({"id": c["cluster"], "name": c["name"], "ha_enabled": c.get("ha_enabled"),
+                                 "drs_enabled": c.get("drs_enabled"), "hosts": [host(h) for h in hosts]})
+            standalone = [host(h) for h in sorted(self._get("/api/vcenter/host", datacenters=dc_id),
+                                                  key=lambda h: h["name"].lower()) if h["host"] not in clustered]
+            # VMs vCenter doesn't report on any host (e.g. orphaned or inaccessible)
+            other = [vm(v) for v in self._get("/api/vcenter/vm", datacenters=dc_id) if v["vm"] not in placed]
+            datacenters.append({
+                "id": dc_id, "name": dc["name"], "clusters": clusters, "standalone_hosts": standalone,
+                "other_vms": sorted(other, key=lambda v: v["name"].lower()),
+                "datastores": sorted(({"id": d["datastore"], "name": d["name"], "type": d.get("type"),
+                                       "capacity": d.get("capacity"), "free_space": d.get("free_space")}
+                                      for d in self._get("/api/vcenter/datastore", datacenters=dc_id)),
+                                     key=lambda d: d["name"].lower()),
+                "networks": sorted(({"id": n["network"], "name": n["name"], "type": n.get("type")}
+                                    for n in self._get("/api/vcenter/network", datacenters=dc_id)),
+                                   key=lambda n: n["name"].lower()),
+            })
+        return {"vcenter": self.base_url.split("://", 1)[1].rsplit(":", 1)[0], "datacenters": datacenters}
+
     # --- actions -----------------------------------------------------------
 
     def power(self, vm_id: str, action: str) -> None:

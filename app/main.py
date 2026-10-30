@@ -718,6 +718,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         audit(request, f"VM power: {body.action}", vm_id, conn)
         return {"ok": True}
 
+    @app.get("/api/vsphere/{conn_id}/topology", dependencies=api)
+    def vs_topology(conn_id: str):
+        with open_connector(get_conn(conn_id, "vsphere")) as c:
+            return c.topology()
+
     @app.get("/api/vsphere/{conn_id}/hosts", dependencies=api)
     def vs_hosts(conn_id: str):
         with open_connector(get_conn(conn_id, "vsphere")) as c:
