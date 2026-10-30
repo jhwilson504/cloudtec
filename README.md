@@ -21,7 +21,7 @@ You can add as many domains and vCenters as you like.
 
 ## Quick start
 
-**Windows:** double-click **`Start KasTec.bat`**. It installs what's needed the first time (you need [Python](https://www.python.org/downloads/) with "Add python.exe to PATH" ticked), starts KasTec and opens it in your browser. Keep its window open while you use KasTec; closing it stops KasTec.
+**Windows:** double-click **`Start KasTec.bat`**. Each time, it first checks GitHub and installs a newer version if there is one (the `data` folder is never touched, and the previous program files are kept as `app.previous`); if the `app` folder is missing it downloads it. To turn automatic updates off, create an empty file called `no-auto-update` in the `data` folder. A copy of the launcher placed elsewhere (e.g. on the Desktop) still finds KasTec in `Desktop\cloudtec-main`. It installs what's needed the first time (you need [Python](https://www.python.org/downloads/) with "Add python.exe to PATH" ticked), starts KasTec and opens it in your browser. Keep its window open while you use KasTec; closing it stops KasTec.
 
 **Any platform, from a terminal:**
 
