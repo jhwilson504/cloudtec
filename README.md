@@ -1,3 +1,5 @@
+<img src="branding/kastec-logo.svg" width="88" alt="KasTec logo">
+
 # KasTec Center
 
 > Formerly **CloudTec**. Settings now use `KASTEC_…` names; the older `CLOUDTEC_…` names still work, and existing data, connections and sign-ins carry over unchanged.
@@ -167,6 +169,20 @@ Commands run on the computer KasTec runs on, as the Windows user who started Kas
 - Saved passwords are encrypted at rest and never returned by the API.
 - AD changes are limited to objects inside each connection's base DN.
 - There is a single admin account. Per-user sign-in (for example via AD/LDAP or SSO) and an audit log are natural next steps.
+
+## Logo
+
+The KasTec mark is a K whose arms end in two nodes: one console joining your directory, virtualisation and hardware. Files are in `branding/`:
+
+| File | Use |
+|---|---|
+| `kastec-logo.svg` | The mark, any size (also used by the app as its icon) |
+| `kastec-logo-512.png`, `kastec-logo-256.png` | The mark as PNG, e.g. Teams, intranet tiles |
+| `kastec-lockup-light.png` / `kastec-lockup-dark.png` | Mark and name, for light / dark backgrounds |
+| `kastec.ico` | Windows icon, e.g. for the Start KasTec shortcut |
+| `concepts.html` | The three concepts that were considered |
+
+Colours: blue `#3b82f6` to `#1e40af` (gradient), accent `#2563eb`, light node `#7dd3fc`.
 
 ## Development
 

@@ -61,7 +61,9 @@ code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monosp
 }
 .brand { font-weight: 700; font-size: 17px; padding: 0 8px; display: flex; gap: 8px; align-items: center; }
 .brand.big { font-size: 22px; padding: 0; }
-.logo { color: var(--accent); }
+.logo { width: 28px; height: 28px; flex-shrink: 0; }
+.brand.big .logo { width: 40px; height: 40px; }
+.tec { color: var(--accent); }
 nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
 nav a {
   color: var(--text); text-decoration: none; padding: 8px 10px; border-radius: 8px; white-space: nowrap;
