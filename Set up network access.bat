@@ -1,15 +1,9 @@
 @echo off
 rem Double-click to let colleagues use KasTec from their own PCs, over HTTPS.
 rem Sets up a certificate, opens the Windows Firewall port and switches KasTec to network mode.
+rem It runs as you (so it uses your Python); Windows asks for permission only to add the firewall rule.
 setlocal
 title KasTec Center - network access
-
-rem Adding the firewall rule needs Administrator: ask for it.
-net session >nul 2>nul
-if errorlevel 1 (
-  powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
-  exit /b 0
-)
 cd /d "%~dp0"
 
 set "PY="
@@ -26,9 +20,9 @@ if not defined PY (
   exit /b 1
 )
 %PY% -c "import cryptography" >nul 2>nul
-if errorlevel 1 %PY% -m pip install -r requirements.txt
+if errorlevel 1 %PY% -m pip install --disable-pip-version-check -q -r requirements.txt
 
 %PY% -m app.tls
 echo.
-echo When you're done, double-click "Start KasTec" to restart KasTec with these settings.
+echo When you're done, double-click "Start KasTec" (or your KasTec shortcut) to restart KasTec with these settings.
 pause

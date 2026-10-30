@@ -80,7 +80,7 @@ Data (connections, encryption key) lives in the `cloudtec-data` volume.
 
 ## Letting colleagues use it (HTTPS on your network)
 
-By default KasTec only answers on the PC it runs on (`http://localhost:8000`). To let colleagues sign in from their own PCs, double-click **`Set up network access.bat`** (it asks for Administrator so it can add the firewall rule) and choose how KasTec gets its HTTPS certificate:
+By default KasTec only answers on the PC it runs on (`http://localhost:8000`). To let colleagues sign in from their own PCs, double-click **`Set up network access.bat`** (Windows asks for permission only when it adds the firewall rule) and choose how KasTec gets its HTTPS certificate:
 
 1. **Company CA (recommended).** KasTec writes `data\tls\request.csr`. Have your CA sign it, e.g. with AD Certificate Services:
    `certreq -submit -attrib "CertificateTemplate:WebServer" data\tls\request.csr cloudtec.cer`

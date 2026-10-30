@@ -176,3 +176,45 @@ def test_ca_made_before_rename_gets_kastec_cer(tmp_path):
     (d / "KasTec-CA.cer").rename(d / "CloudTec-CA.cer")     # what an older version left behind
     tls.make_own_ca_cert(tmp_path, NAMES, IPS)
     assert (d / "KasTec-CA.cer").read_bytes() == (d / "CloudTec-CA.cer").read_bytes()
+
+
+def _fake_windows(monkeypatch, admin, elevate_rc=0, rule_exists=True):
+    calls = []
+
+    def fake_run(args, **kw):
+        cmd = args[-1]
+        calls.append(cmd)
+
+        class R:
+            returncode = 0
+            stdout = stderr = ""
+        if "Start-Process" in cmd:
+            R.returncode = elevate_rc
+        if cmd.startswith("Get-NetFirewallRule"):
+            R.returncode = 0 if rule_exists else 1
+        return R()
+
+    monkeypatch.setattr(tls.os, "name", "nt")
+    monkeypatch.setattr(tls, "_is_admin", lambda: admin)
+    monkeypatch.setattr(tls.subprocess, "run", fake_run)
+    return calls
+
+
+def test_firewall_asks_windows_for_permission_only_for_the_rule(monkeypatch):
+    calls = _fake_windows(monkeypatch, admin=False)
+    ok, msg = tls.open_firewall(8443)
+    assert ok and "TCP 8443" in msg
+    assert "Start-Process powershell -Verb RunAs" in calls[0] and "-EncodedCommand" in calls[0]
+    assert calls[1].startswith("Get-NetFirewallRule -DisplayName 'KasTec Center (HTTPS)'")
+
+
+def test_firewall_prompt_cancelled(monkeypatch):
+    _fake_windows(monkeypatch, admin=False, elevate_rc=1, rule_exists=False)
+    ok, msg = tls.open_firewall(8443)
+    assert not ok and "cancelled" in msg and "New-NetFirewallRule" in msg
+
+
+def test_firewall_when_already_administrator(monkeypatch):
+    calls = _fake_windows(monkeypatch, admin=True)
+    assert tls.open_firewall(8443)[0] is True
+    assert "New-NetFirewallRule" in calls[0] and "RunAs" not in calls[0]

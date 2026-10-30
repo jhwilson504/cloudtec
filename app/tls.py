@@ -16,6 +16,7 @@ Run "python -m app.tls" for an interactive setup, or see "python -m app.tls --he
 from __future__ import annotations
 
 import argparse
+import base64
 import datetime as dt
 import ipaddress
 import json
@@ -248,19 +249,44 @@ def cert_summary(data_dir: Path) -> dict | None:
     }
 
 
+def _is_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
 def open_firewall(port: int) -> tuple[bool, str]:
-    """Allow inbound TCP <port> in Windows Firewall (needs Administrator)."""
+    """Allow inbound TCP <port> in Windows Firewall.
+
+    The wizard runs as the signed-in user (whose Python and files KasTec uses), so
+    only this step asks for Administrator, through the usual Windows prompt.
+    """
     if os.name != "nt":
         return False, "Not Windows: open the port in this machine's firewall yourself."
     script = (f"Remove-NetFirewallRule -DisplayName '{FIREWALL_RULE}','{OLD_FIREWALL_RULE}' -ErrorAction SilentlyContinue; "
               f"New-NetFirewallRule -DisplayName '{FIREWALL_RULE}' -Direction Inbound -Protocol TCP "
               f"-LocalPort {port} -Action Allow -Profile Domain,Private | Out-Null")
-    r = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
-    if r.returncode == 0:
+    manual = ("Command to run in an Administrator PowerShell instead:\n"
+              f"  New-NetFirewallRule -DisplayName '{FIREWALL_RULE}' -Direction Inbound -Protocol TCP "
+              f"-LocalPort {port} -Action Allow -Profile Domain,Private")
+    if _is_admin():
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True)
+    else:
+        print("  Windows will ask for permission to add the firewall rule...")
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        elevate = ("Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden "
+                   f"-ArgumentList '-NoProfile','-EncodedCommand','{encoded}'")
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", elevate], capture_output=True, text=True)
+        if r.returncode != 0:
+            return False, "The firewall rule wasn't added (the Windows permission prompt was cancelled or refused). " + manual
+    check = subprocess.run(["powershell", "-NoProfile", "-Command",
+                            f"Get-NetFirewallRule -DisplayName '{FIREWALL_RULE}' -ErrorAction Stop | Out-Null"],
+                           capture_output=True, text=True)
+    if check.returncode == 0:
         return True, f"Windows Firewall now allows TCP {port} (Domain and Private networks)."
-    return False, ("Couldn't add the firewall rule (run this as Administrator). Command to run in an "
-                   f"Administrator PowerShell:\n  New-NetFirewallRule -DisplayName '{FIREWALL_RULE}' "
-                   f"-Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile Domain,Private")
+    return False, "Couldn't add the firewall rule. " + manual
 
 
 # --- interactive setup ------------------------------------------------------------
