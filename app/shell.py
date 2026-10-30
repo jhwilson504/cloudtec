@@ -190,3 +190,43 @@ try {{
 }} finally {{
   Remove-Variable __cred -ErrorAction SilentlyContinue
 }}"""
+
+
+OK_MARK, ERROR_MARK = "KASTEC-OK", "KASTEC-ERROR:"
+
+
+def run_script(exe: str, script: str, timeout: float = 120) -> tuple[bool, str]:
+    """Run a one-off script in a fresh PowerShell and report whether it finished cleanly.
+
+    Like the interactive session, the script travels base64-encoded over stdin
+    (never on the command line, where other processes could read it).
+    """
+    encoded = base64.b64encode(f"try {{ {script}\n'{OK_MARK}' }} catch {{ '{ERROR_MARK} ' + $_.Exception.Message }}"
+                               .encode("utf-8")).decode("ascii")
+    line = (f"$__c = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}')); "
+            "& ([scriptblock]::Create($__c)) 2>&1 | Out-String -Width 200\n")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    try:
+        r = subprocess.run([exe, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", "-"], input=line,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout, creationflags=flags)
+    except subprocess.TimeoutExpired:
+        return False, f"PowerShell didn't finish within {int(timeout)} seconds."
+    out = ANSI.sub("", r.stdout + r.stderr).strip()
+    if ERROR_MARK in out:
+        return False, out.split(ERROR_MARK, 1)[1].strip()
+    if out.endswith(OK_MARK):
+        return True, out[: -len(OK_MARK)].strip()
+    return False, out or f"PowerShell exited with code {r.returncode}."
+
+
+def restart_computer_script(conn, computer: str) -> str:
+    """Restart-Computer for one machine, signed in with an AD connection's saved account."""
+    user = conn.config.get("bind_user")
+    return (f"$__cred = New-Object System.Management.Automation.PSCredential({ps_quote(user)}, "
+            f"(ConvertTo-SecureString {ps_quote(conn.secret)} -AsPlainText -Force))\n"
+            f"Restart-Computer -ComputerName {ps_quote(computer)} -Credential $__cred -Force -ErrorAction Stop")
+
+
+def restart_domain_controller(exe: str, conn, computer: str) -> tuple[bool, str]:
+    return run_script(exe, restart_computer_script(conn, computer), timeout=120)

@@ -1019,24 +1019,62 @@ async function renderDCs() {
       const portBadges = (d) => Object.entries(ports).map(([p, label]) =>
         `<span class="badge ${d.ports[p] ? "ok" : "bad"}" title="${esc(label)}: ${d.ports[p] ? "reachable" : "not reachable"} from this computer">${p}</span>`).join(" ");
 
+      const conn = conns.find((c) => c.id === state.ad);
       box.innerHTML = `<div class="stats">
           ${stat("Domain controllers", dcs.length, `${count((d) => d.read_only)} read-only`)}
           ${stat("Global Catalogs", count((d) => d.global_catalog))}
           ${stat("Sites", new Set(dcs.map((d) => d.site).filter(Boolean)).size)}
           ${stat("Reachable on 9389", `${count((d) => d.ports["9389"])} / ${dcs.length}`, "needed by PowerShell AD commands")}
         </div>
-        ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon"], dcs.map((d) => `<tr>
+        ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon", ...(isAdmin() ? [""] : [])], dcs.map((d, i) => `<tr>
           <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div></td>
           <td>${esc(d.site || "–")}</td>
           <td>${esc(d.os || "–")}<div class="sub">${esc(d.os_version || "")}</div></td>
           <td>${roleBadges(d)}</td>
           <td style="white-space:nowrap">${portBadges(d)}</td>
-          <td>${fmtDate(d.last_logon)}</td></tr>`), "No domain controllers found.")}
+          <td>${fmtDate(d.last_logon)}</td>
+          ${isAdmin() ? `<td class="actions"><button class="btn small danger" data-restart="${i}">Restart</button></td>` : ""}</tr>`), "No domain controllers found.")}
         <p class="muted small-note">Ports: ${Object.entries(ports).map(([p, l]) => `${p} ${esc(l)}`).join(" · ")}.
           Green means the computer running KasTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;
+      box.querySelectorAll("[data-restart]").forEach((b) => b.onclick = () => restartDC(dcs[b.dataset.restart], dcs, conn));
     } catch (err) {
       box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
     }
+  }
+
+  // Restart one DC, after warnings about what depends on it and typing its name to confirm.
+  function restartDC(dc, dcs, conn) {
+    const host = (conn?.config?.host || "").toLowerCase();
+    const warnings = [];
+    if (dc.roles.length) warnings.push(`It holds FSMO roles (<b>${dc.roles.map(esc).join(", ")}</b>). They're unavailable until it's back.`);
+    const sameSite = dcs.filter((d) => d !== dc && d.site === dc.site);
+    if (!sameSite.length) warnings.push(`It's the only domain controller in site <b>${esc(dc.site || "unknown")}</b>, so users there will authenticate across the WAN until it's back.`);
+    else if (dc.global_catalog && !sameSite.some((d) => d.global_catalog)) warnings.push(`It's the only Global Catalog in site <b>${esc(dc.site)}</b>.`);
+    if (host && [dc.name.toLowerCase(), (dc.dns_name || "").toLowerCase()].includes(host))
+      warnings.push(`KasTec's own connection to ${esc(conn.name)} uses this DC, so KasTec's AD pages will fail until it's back.`);
+    modal(`<h2>Restart ${esc(dc.name)}?</h2>
+      <p>This restarts the domain controller <b>${esc(dc.dns_name || dc.name)}</b> straight away, using the account saved for ${esc(conn?.name || "this domain")}.</p>
+      ${warnings.length ? `<div class="notice bad" style="display:grid;gap:6px">${warnings.map((w) => `<div>⚠ ${w}</div>`).join("")}</div>` : ""}
+      <form id="dc-restart-form" style="display:grid;gap:12px;margin-top:14px">
+        <label><span>Type <b class="mono">${esc(dc.name)}</b> to confirm</span> <input name="confirm" autocomplete="off" spellcheck="false" autocapitalize="none" required></label>
+        <p class="error" id="dc-restart-err" style="margin:0"></p>
+        <div class="modal-actions" style="margin-top:0"><button type="button" class="btn" data-close>Cancel</button>
+          <button class="btn danger" type="submit" disabled>Restart ${esc(dc.name)}</button></div></form>`);
+    const form = $("#dc-restart-form"), go = form.querySelector("button[type=submit]");
+    form.confirm.focus();
+    form.confirm.oninput = () => { go.disabled = form.confirm.value.trim().toLowerCase() !== dc.name.toLowerCase(); };
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      go.disabled = true; go.textContent = "Restarting…";
+      try {
+        const r = await api("POST", `/api/ad/${state.ad}/domain-controllers/restart`, { name: dc.name, confirm: form.confirm.value });
+        closeModal();
+        toast(r.message);
+      } catch (err) {
+        $("#dc-restart-err").textContent = err.message;
+        go.disabled = false; go.textContent = `Restart ${dc.name}`;
+      }
+    };
   }
 
   $("#dc-conn")?.addEventListener("change", (e) => { state.ad = e.target.value; load(); });

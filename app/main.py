@@ -18,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import certwatch
+from . import shell as powershell
 from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
 from .connectors import ConnectorError, open_connector
@@ -94,6 +95,11 @@ class PasswordBody(DnBody):
     new_password: str = Field(min_length=8, max_length=256)
     unlock: bool = False
     must_change: bool = False
+
+
+class RestartDCBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    confirm: str
 
 
 class PowerBody(BaseModel):
@@ -573,6 +579,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             for (dc, port), ok in zip(checks, results):
                 dc.setdefault("ports", {})[str(port)] = ok
         return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()}}
+
+    @app.post("/api/ad/{conn_id}/domain-controllers/restart", dependencies=admin_only)
+    def ad_restart_domain_controller(conn_id: str, body: RestartDCBody, request: Request):
+        conn = get_conn(conn_id, "ad")
+        name = body.name.strip()
+        if body.confirm.strip().lower() != name.lower():
+            raise HTTPException(422, "Type the domain controller's name exactly to confirm the restart.")
+        with open_connector(conn) as c:
+            dc = next((d for d in c.domain_controllers() if d["name"].lower() == name.lower()), None)
+        if not dc:
+            raise HTTPException(404, f"{name} isn't a domain controller in {conn.name}.")
+        if conn.demo:
+            audit(request, "restarted domain controller (demo)", dc["name"], conn)
+            return {"ok": True, "message": f"{dc['name']} is a demo DC, so nothing was restarted."}
+        if not exe:
+            raise HTTPException(409, "PowerShell wasn't found on the computer KasTec runs on, so it can't restart DCs.")
+        ok, output = powershell.restart_domain_controller(exe, conn, dc["dns_name"] or dc["name"])
+        audit(request, "restarted domain controller" if ok else "domain controller restart failed", dc["name"], conn)
+        if not ok:
+            raise HTTPException(502, f"{dc['name']} wasn't restarted: {output}")
+        return {"ok": True, "message": f"Restart sent to {dc['name']}. A domain controller is usually back within 5-10 minutes."}
 
     @app.get("/api/ad/{conn_id}/users", dependencies=api)
     def ad_users(conn_id: str, q: str = ""):
