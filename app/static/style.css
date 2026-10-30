@@ -229,3 +229,4 @@ nav a { display: flex; align-items: center; }
   .topbar, #view { padding-left: 16px; padding-right: 16px; }
   .form { grid-template-columns: 1fr; }
 }
+.cert-req-actions .btn { margin: 2px 2px 2px 0; text-decoration: none; display: inline-block; }

@@ -372,7 +372,8 @@ const CERT_ORDER = { expired: 0, critical: 1, warning: 2, ok: 3, error: 4 };
 
 async function renderCertificates() {
   loading();
-  const c = await api("GET", "/api/certificates");
+  const [c, requests] = await Promise.all([api("GET", "/api/certificates"),
+    isAdmin() ? api("GET", "/api/cert-requests") : null]);
   const list = [...c.certificates].sort((x, y) =>
     (CERT_ORDER[x.level] - CERT_ORDER[y.level]) || ((x.days_left ?? 0) - (y.days_left ?? 0)));
   const count = (level) => list.filter((r) => r.level === level).length;
@@ -408,8 +409,128 @@ async function renderCertificates() {
     </div>
     ${table(["Certificate", "Status", "Days left", "Expires", "Subject", "Owners"], rows,
       isAdmin() ? "No certificates to watch yet. Add some below." : "No certificates are being watched yet.")}
+    ${requests ? certRequestSection(requests) : ""}
     ${c.config ? certForm(c) : ""}`;
   wireCertPage(c);
+  if (requests) wireCertRequests(requests);
+}
+
+// ---- certificate requests: a key + CSR for the CA, then a PFX from what the CA sends back ----
+
+function certRequestSection(requests) {
+  const last = requests[0]?.details ?? {};
+  const field = (name, label, placeholder, extra = "") =>
+    `<label>${label}<input name="${name}" value="${esc(last[name] ?? "")}" placeholder="${esc(placeholder)}" ${extra}></label>`;
+  const rows = requests.map((r, i) => {
+    const file = (kind, label) => `<a class="btn small" href="/api/cert-requests/${encodeURIComponent(r.id)}/${kind}" download>${label}</a>`;
+    const status = r.has_certificate
+      ? `<span class="badge ok">Signed</span><div class="muted">expires ${esc(new Date(r.expires).toLocaleDateString())}${r.issuer ? `, by ${esc(r.issuer)}` : ""}</div>`
+      : '<span class="badge warn">Waiting for the CA</span>';
+    return `<tr><td><b>${esc(r.common_name)}</b>${r.names.length > 1 ? `<div class="muted">${r.names.slice(1).map(esc).join(", ")}</div>` : ""}</td>
+      <td>${fmtDate(r.created)}</td><td>${status}</td>
+      <td class="cert-req-actions">${file("csr", "CSR")}
+        <button class="btn small" data-req="copy" data-i="${i}">Copy CSR</button>
+        <button class="btn small${r.has_certificate ? "" : " primary"}" data-req="signed" data-i="${i}">${r.has_certificate ? "Replace signed cert" : "Add signed cert"}</button>
+        ${r.has_pfx ? file("pfx", "PFX") + file("crt", "CRT") : ""}${file("key", "Key")}
+        <button class="btn small danger" data-req="delete" data-i="${i}">Delete</button></td></tr>`;
+  });
+  return `<div class="card section" id="cert-requests"><h2>Make a certificate</h2>
+    <p class="muted" style="margin-top:0">1. KasTec makes a private key and a certificate request (CSR).
+      2. Send the CSR to the CA (GoDaddy, BiT4U, or your company CA). 3. When the signed certificate comes back, add it here
+      to get a password-protected <b>.pfx</b> to import on the server. KasTec doesn't install anything; the key stays on this PC.</p>
+    <form id="req-form" class="form">
+      <label class="full"><span>Host names, one per line. The first is the main name (common name); the others go in the certificate too.</span>
+        <textarea name="names" rows="3" spellcheck="false" placeholder="btcme1.btcbahamas.com
+autodiscover.btcbahamas.com"></textarea></label>
+      ${field("organization", "Organization", "The Bahamas Telecommunications Company Ltd")}
+      ${field("unit", "Department (optional)", "IT")}
+      ${field("locality", "City", "Nassau")}
+      ${field("state", "State or province", "New Providence")}
+      ${field("country", "Country code", "BS", 'maxlength="2"')}
+      <label>Key size<select name="key_size"><option value="2048">RSA 2048 (what most CAs expect)</option>
+        <option value="4096">RSA 4096</option></select></label>
+      <div class="full" id="req-msg"></div>
+      <div class="full"><button class="btn primary" type="submit">Make key and CSR</button></div>
+    </form>
+    ${requests.length ? `<h2 style="margin-top:22px">Requests</h2>` + table(["Certificate", "Made", "Status", ""], rows) : ""}</div>`;
+}
+
+function readFileB64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result.split(",", 2)[1] ?? "");
+    reader.onerror = () => reject(new Error(`Couldn't read ${file.name}`));
+    reader.readAsDataURL(file);
+  });
+}
+
+function signedCertDialog(r) {
+  modal(`<h2>Add the signed certificate</h2>
+    <p class="muted">For <b>${esc(r.common_name)}</b>. Choose the files the CA sent back: the certificate (.crt, .cer, .pem or .p7b)
+      and, if there is one, the bundle of intermediate certificates (GoDaddy's <code>gd_bundle</code> file). You can pick several at once.</p>
+    <form id="signed-form" class="form">
+      <label class="full">Certificate files<input type="file" name="files" multiple accept=".crt,.cer,.pem,.p7b,.p7c,.der,.txt"></label>
+      <label class="full">Password for the .pfx (you'll type it when importing)<input type="password" name="password" autocomplete="new-password"></label>
+      <div class="full" id="signed-msg"></div>
+      <div class="full modal-actions"><button class="btn" type="button" data-close>Cancel</button>
+        <button class="btn primary" type="submit">Make PFX</button></div>
+    </form>`);
+  const form = $("#signed-form");
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector("[type=submit]");
+    btn.disabled = true;
+    try {
+      if (!form.files.files.length) throw new Error("Choose the certificate file the CA sent.");
+      const files = await Promise.all([...form.files.files].map(readFileB64));
+      await api("POST", `/api/cert-requests/${encodeURIComponent(r.id)}/certificate`, { files, pfx_password: form.password.value });
+      closeModal();
+      await renderCertificates();
+      toast("PFX ready. Use the PFX button to download it.");
+      $("#cert-requests")?.scrollIntoView();
+    } catch (err) {
+      $("#signed-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  };
+}
+
+function wireCertRequests(requests) {
+  const form = $("#req-form");
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector("[type=submit]");
+    btn.disabled = true;
+    const details = Object.fromEntries(["organization", "unit", "locality", "state", "country"].map((k) => [k, form[k].value]));
+    try {
+      const r = await api("POST", "/api/cert-requests", {
+        names: form.names.value.split(/[\s,;]+/).filter(Boolean), details, key_size: Number(form.key_size.value),
+      });
+      await renderCertificates();
+      toast(`Key and CSR made for ${r.common_name}.`);
+      $("#cert-requests")?.scrollIntoView();
+    } catch (err) {
+      $("#req-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+      btn.disabled = false;
+    }
+  };
+  $("#cert-requests").addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-req]");
+    if (!b) return;
+    const r = requests[Number(b.dataset.i)];
+    if (b.dataset.req === "copy") {
+      try { await navigator.clipboard.writeText(r.csr); toast("CSR copied. Paste it into the CA's form."); }
+      catch { modal(`<h2>CSR for ${esc(r.common_name)}</h2><textarea rows="16" style="width:100%" readonly>${esc(r.csr)}</textarea>
+        <div class="modal-actions"><button class="btn" data-close>Close</button></div>`); }
+    } else if (b.dataset.req === "signed") {
+      signedCertDialog(r);
+    } else if (b.dataset.req === "delete") {
+      if (!(await confirmAction("Delete request", `Delete the request for <b>${esc(r.common_name)}</b>? Its private key is deleted too, so a
+        certificate the CA issues for this CSR can no longer be used unless you downloaded the key or PFX.`, "Delete", true))) return;
+      try { await api("DELETE", `/api/cert-requests/${encodeURIComponent(r.id)}`); await renderCertificates(); toast("Deleted."); }
+      catch (err) { toast(err.message, true); }
+    }
+  });
 }
 
 function certForm(c) {

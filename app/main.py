@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import certwatch
+from . import certgen, certwatch
 from . import shell as powershell
 from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
@@ -85,6 +85,17 @@ class ConnectionBody(BaseModel):
 class CertWatchBody(BaseModel):
     targets: list[dict] = Field(default=[], max_length=500)
     email_to: list[str] = Field(default=[], max_length=50)
+
+
+class CertRequestBody(BaseModel):
+    names: list[str] = Field(min_length=1, max_length=100)
+    details: dict[str, str] = {}
+    key_size: int = 2048
+
+
+class SignedCertBody(BaseModel):
+    files: list[str] = Field(min_length=1, max_length=10)  # base64 file contents
+    pfx_password: str = Field(max_length=200)
 
 
 class DnBody(BaseModel):
@@ -456,6 +467,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(502, f"Couldn't send the email: {e}")
         audit(request, "certificates.test-email", ", ".join(to))
         return {"sent_to": to}
+
+    # --- certificate requests (CSR + key, then a PFX once the CA signs it) ---------
+
+    def cert_request(fn, *args):
+        try:
+            return fn(settings.data_dir, *args)
+        except certgen.CertGenError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/cert-requests", dependencies=admin_only)
+    def cert_requests():
+        return certgen.list_requests(settings.data_dir)
+
+    @app.post("/api/cert-requests", dependencies=admin_only, status_code=201)
+    def cert_request_create(body: CertRequestBody, request: Request):
+        out = cert_request(certgen.create_request, body.names, body.details, body.key_size)
+        audit(request, "cert-request.create", ", ".join(out["names"]))
+        return out
+
+    @app.post("/api/cert-requests/{req_id}/certificate", dependencies=admin_only)
+    def cert_request_signed(req_id: str, body: SignedCertBody, request: Request):
+        files = [cert_request(lambda _, f: certgen.decode_upload(f), f) for f in body.files]
+        out = cert_request(certgen.add_certificate, req_id, files, body.pfx_password)
+        audit(request, "cert-request.certificate", out["common_name"])
+        return out
+
+    @app.get("/api/cert-requests/{req_id}/{kind}", dependencies=admin_only)
+    def cert_request_file(req_id: str, kind: Literal["csr", "key", "crt", "pfx"], request: Request):
+        data, name, media = cert_request(certgen.download, req_id, kind)
+        if kind in ("key", "pfx"):
+            audit(request, f"cert-request.download-{kind}", req_id)
+        return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+    @app.delete("/api/cert-requests/{req_id}", dependencies=admin_only)
+    def cert_request_delete(req_id: str, request: Request):
+        cert_request(certgen.delete_request, req_id)
+        audit(request, "cert-request.delete", req_id)
+        return {"ok": True}
 
     # --- overview ----------------------------------------------------------
 
