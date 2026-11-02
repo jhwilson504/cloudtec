@@ -745,6 +745,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with open_connector(get_conn(conn_id, "idrac")) as c:
             return c.servers()
 
+    @app.get("/api/idrac/{conn_id}/servers/{host}/inventory", dependencies=api)
+    def idrac_inventory(conn_id: str, host: str):
+        with open_connector(get_conn(conn_id, "idrac")) as c:
+            return c.inventory(host)
+
     # --- UI ----------------------------------------------------------------
 
     @app.middleware("http")

@@ -84,8 +84,9 @@ function errorsNotice(errors) {
   return errors.map((e) => `<div class="notice bad" style="margin-bottom:10px"><b>${esc(e.connection)}:</b> ${esc(e.error)}</div>`).join("");
 }
 
-function modal(html) {
+function modal(html, wide = false) {
   $("#modal-body").innerHTML = html;
+  $("#modal .modal-card").classList.toggle("wide", wide);
   $("#modal").classList.remove("hidden");
 }
 function closeModal() { $("#modal").classList.add("hidden"); }
@@ -1024,14 +1025,19 @@ async function renderServers() {
   if (!conns.some((c) => c.id === state.idrac)) state.idrac = conns[0].id;
 
   view.innerHTML = `${head}
-    <div class="toolbar">${connectionPicker(conns, state.idrac, "srv-conn")}</div>
+    <div class="toolbar">${connectionPicker(conns, state.idrac, "srv-conn")}
+      <button class="btn primary" id="srv-spec" disabled>Download spec sheet (CSV)</button>
+      <button class="btn" id="srv-csv" disabled>Download every part (CSV)</button>
+      <label class="inline"><input type="checkbox" id="srv-scrub"> Leave out host names, addresses and MACs (for sharing outside BTC)</label></div>
     <div id="srv-body"><p class="muted">Asking each iDRAC…</p></div>`;
 
   async function load() {
     const box = $("#srv-body");
     box.innerHTML = '<p class="muted">Asking each iDRAC…</p>';
+    $("#srv-csv").disabled = $("#srv-spec").disabled = true;
     try {
       const servers = await api("GET", `/api/idrac/${state.idrac}/servers`);
+      const connId = state.idrac;
       const ok = servers.filter((s) => !s.error);
       const count = (f) => ok.filter(f).length;
       const stat = (label, value, sub = "") =>
@@ -1045,19 +1051,43 @@ async function renderServers() {
         </div>
         ${problems.length ? `<div class="notice bad" style="margin-bottom:14px"><b>Needs attention</b>
           <ul style="margin:6px 0 0;padding-left:20px">${problems.map((p) => `<li>${esc(p)}</li>`).join("")}</ul></div>` : ""}
-        ${table(["Server", "Health", "Model", "Service tag", "Power supplies", "CPU / memory", "Firmware"], servers.map((s) => s.error
+        ${table(["Server", "Health", "Model", "Service tag", "Power supplies", "CPU / memory", "Firmware", ""], servers.map((s, i) => s.error
           ? `<tr><td><b>${esc(s.host)}</b></td><td><span class="badge plain">Unreachable</span></td>
-              <td colspan="5" class="muted">${esc(s.error)}</td></tr>`
+              <td colspan="6" class="muted">${esc(s.error)}</td></tr>`
           : `<tr>
-          <td><b>${esc(s.name)}</b><div class="sub mono"><a class="link" href="https://${esc(s.host)}" target="_blank" rel="noopener">${esc(s.host)}</a></div></td>
+          <td><button class="link" data-inv="${i}"><b>${esc(s.name)}</b></button><div class="sub mono"><a class="link" href="https://${esc(s.host)}" target="_blank" rel="noopener">${esc(s.host)}</a></div></td>
           <td>${healthBadge(s.health)} ${s.power_state && s.power_state !== "On" ? `<span class="badge plain">${esc(s.power_state)}</span>` : ""}</td>
           <td>${esc(s.model || "–")}</td>
           <td class="mono">${esc(s.service_tag || "–")}</td>
           <td style="white-space:nowrap">${psuBadges(s.psus)}</td>
           <td>${s.cpus ?? "–"} CPU${s.memory_gib ? ` · ${fmtNum(s.memory_gib)} GB` : ""}<div class="sub">${esc(s.cpu_model || "")}</div></td>
-          <td><div class="sub">BIOS ${esc(s.bios || "–")}</div><div class="sub">iDRAC ${esc(s.idrac_firmware || "–")}</div></td></tr>`),
+          <td><div class="sub">BIOS ${esc(s.bios || "–")}</div><div class="sub">iDRAC ${esc(s.idrac_firmware || "–")}</div></td>
+          <td class="actions"><button class="btn small" data-inv="${i}">Hardware</button></td></tr>`),
           "No servers in this connection.")}
-        <p class="muted small-note">The address opens that server's iDRAC web page.</p>`;
+        <p class="muted small-note">Click a server for its full hardware inventory. The address opens that server's iDRAC web page.</p>`;
+      box.querySelectorAll("[data-inv]").forEach((b) => b.onclick = () => showInventory(connId, servers[b.dataset.inv].host));
+      const exportAll = (btn, name, columns, toRows) => {
+        btn.disabled = !ok.length;
+        btn.onclick = async () => {
+          btn.disabled = true;
+          const label = btn.textContent;
+          btn.textContent = `Reading ${ok.length} server${ok.length === 1 ? "" : "s"}…`;
+          const results = await Promise.all(ok.map((s) =>
+            api("GET", `/api/idrac/${connId}/servers/${encodeURIComponent(s.host)}/inventory`).catch((err) => ({ server: s, failed: err.message }))));
+          const scrub = $("#srv-scrub").checked;
+          const rows = results.flatMap((inv, i) => {
+            const shown = scrub ? scrubbed(inv, i) : inv;
+            return inv.failed ? [[shown.server.name, shown.server.service_tag, `Error: ${inv.failed}`]] : toRows(shown);
+          });
+          downloadCsv(`${name}-${new Date().toISOString().slice(0, 10)}.csv`, columns, rows);
+          const failed = results.filter((r) => r.failed).length;
+          toast(failed ? `Downloaded. ${failed} server(s) couldn't be read; they're marked "Error" in the file.` : "Downloaded.", !!failed);
+          btn.textContent = label;
+          btn.disabled = false;
+        };
+      };
+      exportAll($("#srv-spec"), "server-spec-sheet", SPEC_COLUMNS, (inv) => [specRow(inv)]);
+      exportAll($("#srv-csv"), "hardware-inventory", INVENTORY_COLUMNS, inventoryRows);
     } catch (err) {
       box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
     }
@@ -1066,6 +1096,148 @@ async function renderServers() {
   $("#srv-conn")?.addEventListener("change", (e) => { state.idrac = e.target.value; load(); });
   $("#srv-refresh").onclick = load;
   load();
+}
+
+const warrantyUrl = (tag) => `https://www.dell.com/support/home/en-us/product-support/servicetag/${encodeURIComponent(tag)}/overview`;
+// Drives are sold in decimal sizes (a "1.92 TB" SSD), so show them that way, not in binary units.
+const diskSize = (bytes) => (!bytes ? "" : bytes >= 1e12 ? `${+(bytes / 1e12).toFixed(2)} TB` : `${Math.round(bytes / 1e9)} GB`);
+const speedText = (mbps) => (mbps ? (mbps >= 1000 ? `${mbps / 1000}Gb` : `${mbps}Mb`) : "");
+
+// For sharing outside the company: "Host 1", no addresses or MAC addresses. Service tags stay (the vendor needs them).
+function scrubbed(inv, i) {
+  return {
+    ...inv,
+    server: { ...inv.server, name: `Host ${i + 1}`, host: "" },
+    network: (inv.network ?? []).map((n) => ({ ...n, mac: "" })),
+  };
+}
+
+// One line per server, the facts a vendor asks for when sizing a project.
+const SPEC_COLUMNS = ["Server", "Service tag", "Warranty / ProSupport (look up)", "Model", "Processors", "Cores (total)",
+  "Memory (GB)", "DIMM slots used", "DIMM slots free", "Storage controllers", "Data drives", "Network cards",
+  "Boot device", "BIOS", "iDRAC firmware", "Health"];
+
+function specRow(inv) {
+  const s = inv.server;
+  const cpus = inv.processors ?? [];
+  const cpuModels = [...new Set(cpus.map((p) => p.model).filter(Boolean))];
+  const memGb = (inv.memory ?? []).reduce((a, m) => a + (m.size_mib || 0), 0) / 1024;
+  const slots = inv.memory_slots;
+  const storage = inv.storage ?? [];
+  const dataDrives = storage.filter((c) => !/BOSS/i.test(c.model || c.name || "")).flatMap((c) => c.drives);
+  const driveGroups = {};
+  for (const d of dataDrives) {
+    const key = [diskSize(d.capacity_bytes), d.media, d.protocol, d.manufacturer, d.model].filter(Boolean).join(" ");
+    driveGroups[key] = (driveGroups[key] || 0) + 1;
+  }
+  const nics = (inv.nic_adapters ?? []).length
+    ? inv.nic_adapters.map((a) => [a.model, a.ports ? `${a.ports} ports` : "", speedText(a.max_speed_mbps)].filter(Boolean).join(", "))
+    : [`${(inv.network ?? []).length} ports`];
+  return [
+    s.name, s.service_tag, s.service_tag ? warrantyUrl(s.service_tag) : "", s.model,
+    `${cpus.length}x ${cpuModels.join(" / ") || "?"}`, cpus.reduce((a, p) => a + (p.cores || 0), 0) || "",
+    memGb || "", slots ? `${slots.used} of ${slots.total}` : (inv.memory ?? []).length, slots ? slots.total - slots.used : "",
+    storage.map((c) => `${c.model || c.name}: ${c.kind || ""}`).join("; "),
+    Object.entries(driveGroups).map(([k, n]) => `${n}x ${k}`).join("; ") || "none",
+    nics.join("; "), inv.boot_device || "", s.bios, s.idrac_firmware, s.health,
+  ];
+}
+
+// One line per part, for the CSV download.
+const INVENTORY_COLUMNS = ["Server", "Service tag", "Part", "Slot / name", "Model", "Details", "Serial number", "Health"];
+
+function inventoryRows(inv) {
+  const s = inv.server;
+  const row = (part, slot, model, details, serial, health) => [s.name, s.service_tag, part, slot, model, details, serial, health];
+  return [
+    row("System", s.host, s.model, [`${s.cpus ?? "?"} CPU, ${s.memory_gib ?? "?"} GB memory`,
+      inv.memory_slots ? `${inv.memory_slots.total - inv.memory_slots.used} of ${inv.memory_slots.total} DIMM slots free` : "",
+      inv.boot_device ? `boots from ${inv.boot_device}` : ""].filter(Boolean).join(", "), s.service_tag, s.health),
+    ...inv.processors.map((p) => row("Processor", p.slot, p.model, `${p.cores ?? "?"} cores / ${p.threads ?? "?"} threads`, "", p.health)),
+    ...inv.memory.map((m) => row("Memory", m.slot, m.part_number || "", [m.size_mib ? `${m.size_mib / 1024} GB` : "", m.type, m.speed_mhz ? `${m.speed_mhz} MHz` : "", m.manufacturer].filter(Boolean).join(", "), m.serial, m.health)),
+    ...inv.storage.flatMap((c) => [
+      row("Storage controller", c.name, c.model, [c.kind, c.firmware ? `firmware ${c.firmware}` : ""].filter(Boolean).join(", "), "", c.health),
+      ...c.drives.map((d) => row("Drive", `${c.name}: ${d.name}`, [d.manufacturer, d.model].filter(Boolean).join(" "), [diskSize(d.capacity_bytes), d.media, d.protocol, d.raid_status === "NonRAID" ? "non-RAID" : d.raid_status ? `RAID ${d.raid_status.toLowerCase()}` : "", d.life_left_pct != null ? `${d.life_left_pct}% life left` : ""].filter(Boolean).join(", "), d.serial, d.health)),
+    ]),
+    ...(inv.nic_adapters ?? []).map((a) => row("Network card", a.id, a.model, [a.ports ? `${a.ports} ports` : "", a.max_speed_mbps ? `up to ${speedText(a.max_speed_mbps)}/s` : "", a.firmware ? `firmware ${a.firmware}` : ""].filter(Boolean).join(", "), "", "")),
+    ...inv.network.map((n) => row("Network port", n.name, "", [n.mac, n.speed_mbps ? `${n.speed_mbps / 1000} Gb/s` : "", n.link].filter(Boolean).join(", "), "", n.health)),
+    ...inv.power_supplies.map((p) => row("Power supply", p.name, p.model, [p.capacity_watts ? `${p.capacity_watts} W` : "", p.no_input ? "NO INPUT POWER" : "", p.firmware ? `firmware ${p.firmware}` : ""].filter(Boolean).join(", "), p.serial, p.state === "Absent" ? "Absent" : p.health)),
+    ...inv.firmware.map((f) => row("Firmware", f.name, "", f.version, "", "")),
+  ];
+}
+
+function downloadCsv(filename, columns, rows) {
+  const cell = (v) => { const t = String(v ?? ""); return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t; };
+  // The byte-order mark makes Excel read accented names correctly.
+  const text = "\ufeff" + [columns, ...rows].map((r) => r.map(cell).join(",")).join("\r\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "text/csv" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+async function showInventory(connId, host) {
+  modal(`<p class="muted">Reading the hardware from ${esc(host)}…</p>`, true);
+  let inv;
+  try {
+    inv = await api("GET", `/api/idrac/${connId}/servers/${encodeURIComponent(host)}/inventory`);
+  } catch (err) {
+    modal(`<div class="notice bad">${esc(err.message)}</div><div class="modal-actions"><button class="btn" data-close>Close</button></div>`);
+    return;
+  }
+  const s = inv.server;
+  const section = (key, title, headers, rows) => `<div class="section"><h2>${title}</h2>
+    ${inv.errors[key] ? `<div class="notice bad">${esc(inv.errors[key])}</div>` : table(headers, rows, "None found.")}</div>`;
+  const totalGb = inv.memory.reduce((a, m) => a + (m.size_mib || 0), 0) / 1024;
+  modal(`<div class="page-head" style="margin-bottom:8px"><div><h1>${esc(s.name)}</h1>
+      <p class="muted" style="margin:0">${esc(s.model || "")} · service tag <span class="mono">${esc(s.service_tag || "–")}</span> · ${esc(host)}</p></div>
+      ${healthBadge(s.health)}</div>
+    <dl class="kv">
+      <dt>BIOS</dt><dd>${esc(s.bios || "–")}</dd>
+      <dt>iDRAC firmware</dt><dd>${esc(s.idrac_firmware || "–")}</dd>
+      <dt>Warranty</dt><dd>${s.service_tag ? `<a class="link" href="${esc(warrantyUrl(s.service_tag))}" target="_blank" rel="noopener">Look up on Dell support</a>
+        <span class="muted">(the iDRAC doesn't know the warranty dates)</span>` : "–"}</dd>
+      <dt>Memory</dt><dd>${fmtNum(totalGb)} GB in ${inv.memory.length} module${inv.memory.length === 1 ? "" : "s"}${inv.memory_slots
+        ? ` · <b>${inv.memory_slots.total - inv.memory_slots.used} of ${inv.memory_slots.total} slots free</b>` : ""}</dd>
+      <dt>Drives</dt><dd>${inv.storage.reduce((a, c) => a + c.drives.length, 0)} on ${inv.storage.length} controller${inv.storage.length === 1 ? "" : "s"}${inv.storage.length
+        ? ` (${inv.storage.map((c) => esc(c.kind || c.model || c.name)).join("; ")})` : ""}</dd>
+      <dt>Network cards</dt><dd>${(inv.nic_adapters ?? []).map((a) => esc([a.model, a.ports ? `${a.ports} ports` : "", a.max_speed_mbps ? `up to ${speedText(a.max_speed_mbps)}/s` : ""].filter(Boolean).join(", "))).join("<br>") || "–"}</dd>
+      <dt>Boot device</dt><dd>${esc(inv.boot_device || "Not found (no BOSS card or SD module reported)")}</dd></dl>
+    ${section("processors", "Processors", ["Socket", "Model", "Cores / threads", "Max speed", "Health"], inv.processors.map((p) => `<tr>
+      <td class="mono">${esc(p.slot)}</td><td>${esc(p.model || "–")}</td><td>${p.cores ?? "–"} / ${p.threads ?? "–"}</td>
+      <td>${p.speed_mhz ? `${(p.speed_mhz / 1000).toFixed(1)} GHz` : "–"}</td><td>${healthBadge(p.health)}</td></tr>`))}
+    ${section("memory", "Memory", ["Slot", "Size", "Type / speed", "Maker / part", "Serial", "Health"], inv.memory.map((m) => `<tr>
+      <td class="mono">${esc(m.slot)}</td><td>${m.size_mib ? `${fmtNum(m.size_mib / 1024)} GB` : "–"}</td>
+      <td>${esc(m.type || "")}${m.speed_mhz ? ` · ${m.speed_mhz} MHz` : ""}</td>
+      <td>${esc(m.manufacturer || "")}<div class="sub mono">${esc(m.part_number || "")}</div></td>
+      <td class="mono">${esc(m.serial || "–")}</td><td>${healthBadge(m.health)}</td></tr>`))}
+    ${section("storage", "Storage", ["Controller / drive", "Model", "Size", "Type", "RAID", "Life left", "Serial", "Health"], inv.storage.flatMap((c) => [
+      `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.model || "")}</td>
+        <td colspan="5"><span class="badge ${/pass-through|HBA \(/.test(c.kind || "") ? "ok" : /RAID/.test(c.kind || "") ? "warn" : "plain"}">${esc(c.kind || "Controller")}</span>
+        <span class="muted">${c.firmware ? ` firmware ${esc(c.firmware)}` : ""}</span></td><td>${healthBadge(c.health)}</td></tr>`,
+      ...c.drives.map((d) => `<tr><td style="padding-left:24px">${esc(d.name)}</td><td>${esc([d.manufacturer, d.model].filter(Boolean).join(" ") || "–")}</td>
+        <td>${diskSize(d.capacity_bytes) || "–"}</td><td>${esc([d.media, d.protocol].filter(Boolean).join(" · "))}</td>
+        <td>${esc(d.raid_status === "NonRAID" ? "Non-RAID" : d.raid_status || "–")}</td>
+        <td>${d.life_left_pct != null ? `${d.life_left_pct}%` : "–"}</td><td class="mono">${esc(d.serial || "–")}</td><td>${healthBadge(d.health)}</td></tr>`)]))}
+    ${(inv.nic_adapters ?? []).length ? section("network", "Network cards", ["Card", "Model", "Ports", "Fastest speed", "Firmware"], inv.nic_adapters.map((a) => `<tr>
+      <td class="mono">${esc(a.id || "")}</td><td>${esc(a.model || "–")}<div class="sub">${esc(a.manufacturer || "")}</div></td>
+      <td>${a.ports ?? "–"}</td><td>${a.max_speed_mbps ? `${speedText(a.max_speed_mbps)}/s` : "–"}</td><td class="mono">${esc(a.firmware || "–")}</td></tr>`)) : ""}
+    ${section("network", "Network ports", ["Port", "MAC address", "Speed", "Link", "Health"], inv.network.map((n) => `<tr>
+      <td>${esc(n.name)}<div class="sub mono">${esc(n.id || "")}</div></td><td class="mono">${esc(n.mac || "–")}</td>
+      <td>${n.speed_mbps ? `${n.speed_mbps / 1000} Gb/s` : "–"}</td>
+      <td>${n.link === "LinkUp" ? '<span class="badge ok">Up</span>' : n.link ? '<span class="badge plain">Down</span>' : "–"}</td>
+      <td>${healthBadge(n.health)}</td></tr>`))}
+    ${section("power_supplies", "Power supplies", ["Slot", "Model", "Capacity", "Input", "Serial", "Health"], inv.power_supplies.map((p) => `<tr>
+      <td><b>${esc(p.name)}</b></td><td>${esc(p.model || "–")}<div class="sub mono">${esc(p.part_number || "")}</div></td>
+      <td>${p.capacity_watts ? `${p.capacity_watts} W` : "–"}</td>
+      <td>${p.state === "Absent" ? '<span class="badge plain">Empty slot</span>' : p.no_input ? '<span class="badge bad">No power</span>' : p.input_volts ? `${p.input_volts} V` : "–"}</td>
+      <td class="mono">${esc(p.serial || "–")}</td><td>${healthBadge(p.health)}</td></tr>`))}
+    ${section("firmware", "Firmware", ["Component", "Version"], inv.firmware.map((f) => `<tr><td>${esc(f.name)}</td><td class="mono">${esc(f.version || "–")}</td></tr>`))}
+    <p class="muted small-note">vSAN needs its data drives on an HBA, or on a PERC switched to HBA / pass-through mode, and the drives must be on the VMware compatibility list. vSAN ESA wants 25 Gb networking.</p>
+    <div class="modal-actions"><button class="btn" id="inv-csv">Download as CSV</button><button class="btn primary" data-close>Close</button></div>`, true);
+  $("#inv-csv").onclick = () => downloadCsv(`hardware-${s.name.split(".")[0]}-${new Date().toISOString().slice(0, 10)}.csv`,
+    INVENTORY_COLUMNS, inventoryRows(inv));
 }
 
 // ---- cross-check ---------------------------------------------------------
