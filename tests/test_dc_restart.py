@@ -111,3 +111,11 @@ def test_restart_script_keeps_password_off_the_command_line(monkeypatch):
     assert "ecret" not in seen["input"]                   # and only base64-encoded on stdin
     script = shell.restart_computer_script(conn, "dc1.btc")
     assert "Restart-Computer -ComputerName 'dc1.btc'" in script and "'it''s $ecret'" in script
+
+
+def test_dc_page_learns_the_domains_dcs_and_says_which_one_is_used(setup):
+    app, admin, real, calls, _ = setup
+    r = admin.get(f"/api/ad/{real}/domain-controllers").json()
+    assert r["configured_dc"] == "btcproddc1.btcbahamas.com"
+    conn = next(c for c in admin.get("/api/connections").json() if c["id"] == real)
+    assert conn["config"]["known_dcs"] == ["btcproddc1.btcbahamas.com"]

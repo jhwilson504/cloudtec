@@ -1436,7 +1436,8 @@ async function renderDCs() {
     const box = $("#dc-body");
     box.innerHTML = '<p class="muted">Finding domain controllers and checking their ports…</p>';
     try {
-      const { dcs, ports } = await api("GET", `/api/ad/${state.ad}/domain-controllers`);
+      const { dcs, ports, configured_dc, connected_via } = await api("GET", `/api/ad/${state.ad}/domain-controllers`);
+      const failedOver = connected_via && configured_dc && connected_via.toLowerCase() !== configured_dc.toLowerCase();
       const count = (f) => dcs.filter(f).length;
       const stat = (label, value, sub = "") =>
         `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
@@ -1449,7 +1450,9 @@ async function renderDCs() {
         `<span class="badge ${d.ports[p] ? "ok" : "bad"}" title="${esc(label)}: ${d.ports[p] ? "reachable" : "not reachable"} from this computer">${p}</span>`).join(" ");
 
       const conn = conns.find((c) => c.id === state.ad);
-      box.innerHTML = `<div class="stats">
+      box.innerHTML = `${failedOver ? `<div class="notice bad" style="margin-bottom:14px">
+          <b>${esc(configured_dc)}</b> isn't answering, so KasTec is using <b>${esc(connected_via)}</b> for now.
+          It switches back automatically when ${esc(configured_dc)} answers again.</div>` : ""}<div class="stats">
           ${stat("Domain controllers", dcs.length, `${count((d) => d.read_only)} read-only`)}
           ${stat("Global Catalogs", count((d) => d.global_catalog))}
           ${stat("Sites", new Set(dcs.map((d) => d.site).filter(Boolean)).size)}

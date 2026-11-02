@@ -22,6 +22,7 @@ from . import shell as powershell
 from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
 from .connectors import ConnectorError, open_connector
+from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
@@ -510,12 +511,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- overview ----------------------------------------------------------
 
+    def learn_dcs(conn: Connection, names: list[str] | None) -> None:
+        """Remember an AD connection's DCs, so KasTec can switch to another if its usual one is down."""
+        names = sorted({n for n in names or [] if n}, key=str.lower)
+        if conn.kind == "ad" and not conn.demo and names and names != conn.config.get("known_dcs"):
+            store.update_config(conn.id, {**conn.config, "known_dcs": names})
+
     @app.get("/api/dashboard", dependencies=api)
     def dashboard():
-        return [
-            {**conn.public(), "summary": result, "error": error}
-            for conn, result, error in gather(store.list(), lambda c: c.summary())
-        ]
+        def summary(c):
+            learned = None
+            if isinstance(c, ADConnector):
+                try:
+                    learned = c.dc_hostnames()
+                except ConnectorError:
+                    pass  # learning DCs is a bonus; never let it spoil the summary
+            return c.summary(), learned
+
+        out = []
+        for conn, result, error in gather(store.list(), summary):
+            if result:
+                learn_dcs(conn, result[1])
+            out.append({**conn.public(), "summary": result[0] if result else None, "error": error})
+        return out
 
     @app.get("/api/search", dependencies=api)
     def search(q: str):
@@ -621,15 +639,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/ad/{conn_id}/domain-controllers", dependencies=api)
     def ad_domain_controllers(conn_id: str):
-        with open_connector(get_conn(conn_id, "ad")) as c:
+        conn = get_conn(conn_id, "ad")
+        with open_connector(conn) as c:
             dcs = c.domain_controllers()
+            via = getattr(c, "server_host", None)
+        learn_dcs(conn, [d.get("dns_name") for d in dcs])
         checks = [(dc, port) for dc in dcs if "ports" not in dc for port in DC_PORTS]
         if checks:
             with ThreadPoolExecutor(max_workers=min(32, len(checks))) as pool:
                 results = list(pool.map(lambda x: port_open(x[0]["dns_name"] or x[0]["name"], x[1]), checks))
             for (dc, port), ok in zip(checks, results):
                 dc.setdefault("ports", {})[str(port)] = ok
-        return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()}}
+        return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()},
+                "configured_dc": conn.config.get("host"), "connected_via": via}
 
     @app.post("/api/ad/{conn_id}/domain-controllers/restart", dependencies=admin_only)
     def ad_restart_domain_controller(conn_id: str, body: RestartDCBody, request: Request):

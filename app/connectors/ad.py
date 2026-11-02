@@ -10,16 +10,25 @@ Config keys:
 The connection secret is the bind password.
 """
 
+import logging
 import ssl
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 from ldap3 import BASE, MODIFY_REPLACE, NONE, SUBTREE, Connection, Server, Tls
-from ldap3.core.exceptions import LDAPException
+from ldap3.core.exceptions import LDAPCommunicationError, LDAPException
 from ldap3.utils.conv import escape_filter_chars
 
 from .base import ConnectorError
 
+log = logging.getLogger("cloudtec")
+
 UAC_DISABLED = 0x2
+# A DC that didn't answer is tried last for this long, so pages stay quick while it's down.
+RECENT_FAILURE_SECONDS = 60
+_recent_failures: dict[str, float] = {}
+_failures_lock = threading.Lock()
 UF_LOCKOUT = 0x10  # in msDS-User-Account-Control-Computed: locked right now
 COMPUTED_UAC = "msDS-User-Account-Control-Computed"
 FOREVER = timedelta.max
@@ -121,21 +130,50 @@ class ADConnector:
         self.base_dn = config.get("base_dn", "").strip()
         self.bind_user = config.get("bind_user", "").strip()
         self.password = secret
+        # Other DCs of the domain, learned from earlier visits; tried if self.host doesn't answer.
+        self.known_dcs = [h for h in config.get("known_dcs") or [] if h and h.lower() != self.host.lower()]
+        self.server_host: str | None = None   # the DC actually used
         self._conn: Connection | None = None
         self._lockout_window: timedelta | None = None
         if not (self.host and self.base_dn and self.bind_user):
             raise ConnectorError("host, base_dn and bind_user are required")
 
+    def candidates(self) -> list[str]:
+        """The configured DC first, then the others; any that just failed to answer go last."""
+        hosts = [self.host] + self.known_dcs
+        now = time.monotonic()
+        with _failures_lock:
+            recent = {h for h in hosts if now - _recent_failures.get(h.lower(), -1e9) < RECENT_FAILURE_SECONDS}
+        return [h for h in hosts if h not in recent] + [h for h in hosts if h in recent]
+
     def __enter__(self) -> "ADConnector":
         tls = Tls(validate=ssl.CERT_REQUIRED if self.verify_ssl else ssl.CERT_NONE)
-        server = Server(self.host, port=self.port, use_ssl=self.use_ssl, tls=tls,
-                        get_info=NONE, connect_timeout=10)
-        try:
-            self._conn = Connection(server, user=self.bind_user, password=self.password,
-                                    auto_bind=True, receive_timeout=30, raise_exceptions=True)
-        except LDAPException as e:
-            raise ConnectorError(f"Could not bind to {self.host}:{self.port}: {e}") from e
-        return self
+        unreachable = []
+        for host in self.candidates():
+            server = Server(host, port=self.port, use_ssl=self.use_ssl, tls=tls, get_info=NONE, connect_timeout=5)
+            try:
+                self._conn = Connection(server, user=self.bind_user, password=self.password,
+                                        auto_bind=True, receive_timeout=30, raise_exceptions=True)
+            except LDAPCommunicationError as e:
+                # Can't reach this DC: try the next one.
+                with _failures_lock:
+                    _recent_failures[host.lower()] = time.monotonic()
+                unreachable.append(f"{host}: {e}")
+                continue
+            except LDAPException as e:
+                # Reached a DC but it refused (e.g. wrong password): other DCs would refuse too,
+                # and repeating a bad password on every DC could lock the account out.
+                raise ConnectorError(f"Could not bind to {host}:{self.port}: {e}") from e
+            with _failures_lock:
+                _recent_failures.pop(host.lower(), None)
+            self.server_host = host
+            if host.lower() != self.host.lower():
+                log.warning("%s didn't answer, so KasTec is using %s instead.", self.host, host)
+            return self
+        hint = "" if self.known_dcs else (" KasTec doesn't know the domain's other DCs yet; it learns them "
+                                          "when the dashboard or Domain controllers page loads while a DC is up.")
+        raise ConnectorError(f"Could not reach a domain controller on port {self.port}. "
+                             + "; ".join(unreachable) + "." + hint)
 
     def __exit__(self, *exc) -> None:
         if self._conn:
@@ -272,6 +310,11 @@ class ADConnector:
             return {}
         entries = [r for r in self._conn.response if r.get("type") == "searchResEntry"]
         return entries[0]["attributes"] if entries else {}
+
+    def dc_hostnames(self) -> list[str]:
+        """DNS names of the domain's DCs (a cheap query, used to learn where to fail over to)."""
+        return sorted({_first(d, "dNSHostName") for d in self._search(DC_FILTER, ["dNSHostName"], 200, base=self.domain_dn)
+                       if _first(d, "dNSHostName")}, key=str.lower)
 
     def domain_controllers(self) -> list[dict]:
         """Every DC in the domain, with its site, Global Catalog flag and FSMO roles."""

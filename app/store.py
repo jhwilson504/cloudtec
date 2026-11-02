@@ -156,6 +156,11 @@ class Store:
             self._db.commit()
         return conn
 
+    def update_config(self, conn_id: str, config: dict) -> None:
+        with self._lock:
+            self._db.execute("UPDATE connections SET config = ? WHERE id = ?", (json.dumps(config), conn_id))
+            self._db.commit()
+
     def delete(self, conn_id: str) -> bool:
         with self._lock:
             cur = self._db.execute("DELETE FROM connections WHERE id = ?", (conn_id,))
