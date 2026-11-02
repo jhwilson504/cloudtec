@@ -32,7 +32,9 @@ class FakeConnection:
 def fake_ldap(monkeypatch):
     FakeConnection.down, FakeConnection.refused, FakeConnection.attempts = set(), set(), []
     monkeypatch.setattr(ad, "Connection", FakeConnection)
+    monkeypatch.setattr(ad, "discover_dcs", lambda domain: [])
     ad._recent_failures.clear()
+    ad._discovered.clear()
 
 
 def connect(config=CONFIG):
@@ -79,7 +81,53 @@ def test_all_dcs_down():
     assert "doesn't know" not in str(e.value)
 
 
+NOT_LEARNED = {k: v for k, v in CONFIG.items() if k != "known_dcs"}
+
+
 def test_without_learned_dcs_the_error_explains_why():
     FakeConnection.down = {"dc1.corp.example.com"}
-    with pytest.raises(ConnectorError, match="doesn't know the domain's other DCs yet"):
-        connect({k: v for k, v in CONFIG.items() if k != "known_dcs"})
+    with pytest.raises(ConnectorError, match="couldn't find corp.example.com's other DCs in DNS"):
+        connect(NOT_LEARNED)
+
+
+def test_finds_other_dcs_in_dns_when_none_are_known(monkeypatch):
+    asked = []
+    monkeypatch.setattr(ad, "discover_dcs",
+                        lambda domain: asked.append(domain) or ["dc1.corp.example.com", "dc2.corp.example.com"])
+    FakeConnection.down = {"dc1.corp.example.com"}
+    assert connect(NOT_LEARNED) == "dc2.corp.example.com"
+    assert asked == ["corp.example.com"]                                    # domain from the base DN
+    assert FakeConnection.attempts == ["dc1.corp.example.com", "dc2.corp.example.com"]   # dc1 not tried twice
+
+
+def test_dns_is_only_asked_when_the_known_dcs_fail(monkeypatch):
+    monkeypatch.setattr(ad, "discover_dcs", lambda domain: pytest.fail("shouldn't look up DNS"))
+    assert connect() == "dc1.corp.example.com"
+
+
+def test_discover_dcs_from_srv_records(monkeypatch):
+    monkeypatch.undo()                     # the real discover_dcs, with Windows and PowerShell faked
+    ad._discovered.clear()
+    seen = []
+
+    class R:
+        stdout = "BTCPRODDC2.btcbahamas.com\nbtcproddc1.btcbahamas.com.\n\n"
+
+    monkeypatch.setattr(ad.os, "name", "nt")
+    monkeypatch.setattr(ad.shutil, "which", lambda name: "powershell.exe")
+    monkeypatch.setattr(ad.subprocess, "run", lambda args, **kw: seen.append(args[-1]) or R())
+    assert ad.discover_dcs("btcbahamas.com") == ["btcproddc1.btcbahamas.com", "btcproddc2.btcbahamas.com"]
+    assert "_ldap._tcp.dc._msdcs.btcbahamas.com" in seen[0]
+    ad.discover_dcs("btcbahamas.com")
+    assert len(seen) == 1                                                   # cached
+    assert ad.discover_dcs("bad name; Remove-Item C:\\") == []             # never reaches PowerShell
+
+
+def test_discover_dcs_falls_back_to_the_domains_addresses(monkeypatch):
+    monkeypatch.undo()
+    ad._discovered.clear()
+    monkeypatch.setattr(ad.os, "name", "posix")
+    monkeypatch.setattr(ad.socket, "getaddrinfo", lambda host, *a, **k: [(0, 0, 0, "", ("10.0.0.1", 0)), (0, 0, 0, "", ("10.0.0.2", 0))])
+    monkeypatch.setattr(ad.socket, "gethostbyaddr",
+                        lambda ip: {"10.0.0.1": ("DC1.corp.example.com", [], [ip])}.get(ip) or (_ for _ in ()).throw(OSError()))
+    assert ad.discover_dcs("corp.example.com") == ["dc1.corp.example.com"]

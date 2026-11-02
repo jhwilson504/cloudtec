@@ -11,7 +11,12 @@ The connection secret is the bind password.
 """
 
 import logging
+import os
+import re
+import shutil
+import socket
 import ssl
+import subprocess
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -29,6 +34,47 @@ UAC_DISABLED = 0x2
 RECENT_FAILURE_SECONDS = 60
 _recent_failures: dict[str, float] = {}
 _failures_lock = threading.Lock()
+DNS_CACHE_SECONDS = 600
+_discovered: dict[str, tuple[float, list[str]]] = {}
+DOMAIN_NAME = re.compile(r"^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
+
+
+def discover_dcs(domain: str) -> list[str]:
+    """A domain's DCs from DNS, the way Windows finds them: the _ldap._tcp.dc._msdcs SRV
+    records (looked up with PowerShell on Windows), else the domain name's own addresses
+    turned back into host names."""
+    if not DOMAIN_NAME.match(domain or ""):
+        return []
+    key, now = domain.lower(), time.monotonic()
+    with _failures_lock:
+        cached = _discovered.get(key)
+        if cached and now - cached[0] < DNS_CACHE_SECONDS:
+            return cached[1]
+    names: list[str] = []
+    exe = shutil.which("powershell") if os.name == "nt" else None
+    if exe:
+        try:
+            r = subprocess.run(
+                [exe, "-NoProfile", "-NonInteractive", "-Command",
+                 f"Resolve-DnsName -Type SRV -Name '_ldap._tcp.dc._msdcs.{domain}' -ErrorAction Stop | "
+                 "Where-Object Type -eq 'SRV' | ForEach-Object NameTarget"],
+                capture_output=True, text=True, timeout=15, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            names = [line.strip().rstrip(".") for line in r.stdout.splitlines() if line.strip()]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not names:
+        try:
+            for ip in {a[4][0] for a in socket.getaddrinfo(domain, None, proto=socket.IPPROTO_TCP)}:
+                try:
+                    names.append(socket.gethostbyaddr(ip)[0])
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    names = sorted({n.lower() for n in names if n}, key=str.lower)
+    with _failures_lock:
+        _discovered[key] = (now, names)
+    return names
 UF_LOCKOUT = 0x10  # in msDS-User-Account-Control-Computed: locked right now
 COMPUTED_UAC = "msDS-User-Account-Control-Computed"
 FOREVER = timedelta.max
@@ -146,10 +192,33 @@ class ADConnector:
             recent = {h for h in hosts if now - _recent_failures.get(h.lower(), -1e9) < RECENT_FAILURE_SECONDS}
         return [h for h in hosts if h not in recent] + [h for h in hosts if h in recent]
 
+    @property
+    def domain_name(self) -> str:
+        """btcbahamas.com, from the base DN (or the bind account's UPN)."""
+        name = ".".join(p.split("=", 1)[1] for p in self.domain_dn.split(",") if "=" in p)
+        return name or self.bind_user.partition("@")[2]
+
     def __enter__(self) -> "ADConnector":
         tls = Tls(validate=ssl.CERT_REQUIRED if self.verify_ssl else ssl.CERT_NONE)
-        unreachable = []
-        for host in self.candidates():
+        unreachable: list[str] = []
+        tried: set[str] = set()
+        if self._try(self.candidates(), tls, unreachable, tried):
+            return self
+        # None of the DCs KasTec knows answered: look the domain's DCs up in DNS and try the others.
+        found = [h for h in discover_dcs(self.domain_name) if h.lower() not in tried]
+        if found and self._try(found, tls, unreachable, tried):
+            return self
+        hint = ""
+        if not self.known_dcs and not found:
+            hint = (f" KasTec couldn't find {self.domain_name}'s other DCs in DNS either, and hasn't learned them yet "
+                    "(it does when the dashboard or Domain controllers page loads while a DC is up).")
+        raise ConnectorError(f"Could not reach a domain controller on port {self.port}. "
+                             + "; ".join(unreachable) + "." + hint)
+
+    def _try(self, hosts: list[str], tls: Tls, unreachable: list[str], tried: set[str]) -> bool:
+        """Bind to the first of hosts that answers. False if none could be reached."""
+        for host in hosts:
+            tried.add(host.lower())
             server = Server(host, port=self.port, use_ssl=self.use_ssl, tls=tls, get_info=NONE, connect_timeout=5)
             try:
                 self._conn = Connection(server, user=self.bind_user, password=self.password,
@@ -169,11 +238,8 @@ class ADConnector:
             self.server_host = host
             if host.lower() != self.host.lower():
                 log.warning("%s didn't answer, so KasTec is using %s instead.", self.host, host)
-            return self
-        hint = "" if self.known_dcs else (" KasTec doesn't know the domain's other DCs yet; it learns them "
-                                          "when the dashboard or Domain controllers page loads while a DC is up.")
-        raise ConnectorError(f"Could not reach a domain controller on port {self.port}. "
-                             + "; ".join(unreachable) + "." + hint)
+            return True
+        return False
 
     def __exit__(self, *exc) -> None:
         if self._conn:

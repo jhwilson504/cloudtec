@@ -148,7 +148,7 @@ Commands run on the computer KasTec runs on, as the Windows user who started Kas
 
 ## If a domain controller is down
 
-KasTec learns each domain's DCs whenever the dashboard or Domain controllers page loads. If the DC set on the connection doesn't answer (restarting, offline, unreachable), KasTec uses the next DC that does, notes it in the KasTec window and on the Domain controllers page, and goes back to the usual DC when it answers again. A DC that just failed is tried last for a minute, so pages stay quick. KasTec only switches when a DC can't be reached: if a DC refuses the sign-in (e.g. a wrong password), it stops, rather than repeating the password on every DC and risking an account lockout. (The PowerShell page's Connect still uses the DC set on the connection.)
+KasTec learns each domain's DCs whenever the dashboard or Domain controllers page loads, and if none of the DCs it knows answers, it looks the domain's DCs up in DNS (the `_ldap._tcp.dc._msdcs.<domain>` records Windows uses). If the DC set on the connection doesn't answer (restarting, offline, unreachable), KasTec uses the next DC that does, notes it in the KasTec window and on the Domain controllers page, and goes back to the usual DC when it answers again. A DC that just failed is tried last for a minute, so pages stay quick. KasTec only switches when a DC can't be reached: if a DC refuses the sign-in (e.g. a wrong password), it stops, rather than repeating the password on every DC and risking an account lockout. (The PowerShell page's Connect still uses the DC set on the connection.)
 
 ## Requirements on the other side
 
