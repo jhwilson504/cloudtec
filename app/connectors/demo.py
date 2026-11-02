@@ -333,3 +333,48 @@ class DemoIDRAC:
 
     def summary(self) -> dict:
         return summarize(self.data)
+
+    def inventory(self, host: str) -> dict:
+        server = next((s for s in self.servers() if s["host"] == host), None)
+        if not server:
+            raise ConnectorError(f"{host} isn't one of this connection's iDRACs")
+        rng = random.Random(f"inv-{host}")
+        tag = server["service_tag"]
+        dimm_gib = server["memory_gib"] // 16
+        sn = lambda n=8: "".join(rng.choice("0123456789ABCDEF") for _ in range(n))  # noqa: E731
+        return {
+            "server": server,
+            "errors": {},
+            "processors": [{"slot": f"CPU.Socket.{i}", "model": server["cpu_model"], "cores": 32, "threads": 64,
+                            "speed_mhz": 4000, "health": "OK"} for i in (1, 2)],
+            "memory": [{"slot": f"DIMM.Socket.{bank}{n}", "size_mib": dimm_gib * 1024, "type": "DDR4",
+                        "speed_mhz": 3200, "manufacturer": "Hynix Semiconductor", "part_number": "HMAA8GR7AJR4N-XN",
+                        "serial": sn(), "health": "OK"} for bank in "AB" for n in range(1, 9)],
+            "memory_slots": {"total": 32, "used": 16},
+            "storage": [
+                {"name": "BOSS-S2", "model": "BOSS-S2", "kind": "Boot card (BOSS)", "mode": None,
+                 "firmware": "2.5.13.4008", "health": "OK", "drives": [
+                    {"name": f"Disk {i}", "model": "MTFDDAV480TDS", "manufacturer": "MICRON", "capacity_bytes": 480103981056,
+                     "media": "SSD", "protocol": "SATA", "serial": sn(12), "life_left_pct": 99, "raid_status": "Online",
+                     "health": "OK"} for i in (0, 1)]},
+                {"name": "PERC H755 Front", "model": "PERC H755 Front", "kind": "PERC RAID controller (RAID-Mode)",
+                 "mode": "RAID-Mode", "firmware": "52.21.0-4606", "health": "OK",
+                 "drives": [{"name": f"Solid State Disk 0:1:{i}", "model": "MZILT1T9HBJR0D3", "manufacturer": "SAMSUNG",
+                             "capacity_bytes": 1920383410176, "media": "SSD", "protocol": "SAS", "serial": sn(12),
+                             "life_left_pct": 100 - i, "raid_status": "Online", "health": "OK"} for i in range(4)]},
+            ],
+            "network": [{"name": f"Integrated NIC 1 Port {p} Partition 1", "id": f"NIC.Integrated.1-{p}-1",
+                         "mac": "B4:45:06:" + ":".join(sn(2) for _ in range(3)),
+                         "speed_mbps": 25000 if p <= 2 else 1000, "link": "LinkUp" if p != 1 else "LinkDown",
+                         "health": "OK"} for p in range(1, 5)],
+            "nic_adapters": [{"id": "NIC.Integrated.1", "model": "Broadcom Adv. Quad 25Gb Ethernet", "manufacturer": "Broadcom Inc.",
+                              "ports": 4, "max_speed_mbps": 25000, "firmware": "22.31.6"}],
+            "boot_device": "BOSS card",
+            "power_supplies": [{**p, "model": "PWR SPLY,1400W,RDNT,LTON", "serial": f"CN{sn(10)}",
+                                "part_number": "0Y1R9GA02", "firmware": "00.1D.9E"} for p in server["psus"]],
+            "firmware": [{"name": n, "version": v} for n, v in [
+                ("BIOS", server["bios"]), ("Integrated Dell Remote Access Controller", server["idrac_firmware"]),
+                ("Broadcom Adv. Quad 25Gb Ethernet", "22.31.6"), ("PERC H755 Front", "52.21.0-4606"),
+                ("BOSS-S2", "2.5.13.4008"), ("Power Supply.Slot.1", "00.1D.9E"), ("Power Supply.Slot.2", "00.1D.9E"),
+                (f"Lifecycle Controller ({tag})", server["idrac_firmware"])]],
+        }

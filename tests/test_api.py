@@ -262,3 +262,12 @@ def test_vsphere_topology_endpoint(client):
     hosts = [h for c in dc["clusters"] for h in c["hosts"]] + dc["standalone_hosts"]
     assert sum(len(h["vms"]) for h in hosts) == len(client.get(f"/api/vsphere/{vs}/vms").json())
     assert dc["datastores"] and dc["networks"]
+
+
+def test_idrac_inventory(client):
+    srv = add_demo(client, "idrac", "Rack")
+    host = client.get(f"/api/idrac/{srv}/servers").json()[0]["host"]
+    inv = client.get(f"/api/idrac/{srv}/servers/{host}/inventory").json()
+    assert inv["server"]["host"] == host and inv["processors"] and inv["memory_slots"]["total"] == 32
+    assert inv["boot_device"] == "BOSS card"
+    assert client.get(f"/api/idrac/{srv}/servers/10.9.9.9/inventory").status_code == 502
