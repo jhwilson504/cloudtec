@@ -179,7 +179,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                   lifespan=lifespan)
 
     @app.exception_handler(ConnectorError)
-    def connector_error(_: Request, exc: ConnectorError):
+    def connector_error(request: Request, exc: ConnectorError):
+        # Also show the reason in the KasTec window, not just on the page.
+        log.warning("Problem with %s %s: %s", request.method, request.url.path, exc)
         return JSONResponse(status_code=502, content={"detail": str(exc)})
 
     def lookup(username: str | None) -> dict | None:

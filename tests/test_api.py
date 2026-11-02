@@ -271,3 +271,14 @@ def test_idrac_inventory(client):
     assert inv["server"]["host"] == host and inv["processors"] and inv["memory_slots"]["total"] == 32
     assert inv["boot_device"] == "BOSS card"
     assert client.get(f"/api/idrac/{srv}/servers/10.9.9.9/inventory").status_code == 502
+
+
+def test_backend_errors_are_logged_with_their_reason(client, caplog):
+    import logging
+    client.post("/api/connections", json={"kind": "vsphere", "name": "dead", "password": "x",
+                                          "config": {"host": "127.0.0.1", "port": 1, "username": "u"}})
+    vs = next(c["id"] for c in client.get("/api/connections").json() if c["name"] == "dead")
+    with caplog.at_level(logging.WARNING, logger="cloudtec"):
+        r = client.get(f"/api/vsphere/{vs}/hosts")
+    assert r.status_code == 502
+    assert f"GET /api/vsphere/{vs}/hosts" in caplog.text and "Could not reach vCenter" in caplog.text
