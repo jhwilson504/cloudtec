@@ -63,6 +63,10 @@ def summarize(nodes: list[dict], alerts: list[dict]) -> dict:
         "unmanaged": groups.count("unmanaged"),
         "alerts": len(alerts),
         "critical_alerts": sum(1 for a in alerts if a["severity"] in ("Critical", "Serious")),
+        # For the dashboard banner: what's down, and critical alerts nobody has picked up yet.
+        "down_nodes": [n["name"] for n in nodes if n["group"] == "down"][:10],
+        "critical": [{"name": a["name"], "object": a["object"]} for a in alerts
+                     if a["severity"] in ("Critical", "Serious") and not a["acknowledged"]][:10],
     }
 
 

@@ -234,7 +234,7 @@ $("#global-search").addEventListener("submit", (e) => {
 async function renderDashboard() {
   loading();
   const [items, certs] = await Promise.all([api("GET", "/api/dashboard"), api("GET", "/api/certificates").catch(() => null)]);
-  const banner = certBanner(certs);
+  const banner = certBanner(certs) + swBanner(items);
   if (!items.length) {
     view.innerHTML = `${banner}<div class="page-head"><div><h1>Welcome to KasTec Center</h1>
       <p class="muted">Connect your Active Directory domains, vCenter servers and iDRACs to manage them from one place.</p></div></div>
@@ -327,6 +327,20 @@ function certWhen(c) {
   const date = new Date(c.expires).toLocaleDateString();
   if (c.level === "expired") return `expired ${esc(date)}`;
   return `expires ${esc(date)} (${c.days_left} day${c.days_left === 1 ? "" : "s"})`;
+}
+
+// SolarWinds problems on the dashboard: nodes down and critical alerts nobody has acknowledged.
+function swBanner(items) {
+  const sums = items.filter((i) => i.kind === "solarwinds" && i.summary);
+  const down = sums.flatMap((i) => i.summary.down_nodes || []);
+  const critical = sums.flatMap((i) => i.summary.critical || []);
+  if (!down.length && !critical.length) return "";
+  const title = [down.length ? `${down.length} node${down.length === 1 ? " is" : "s are"} down` : "",
+    critical.length ? `${critical.length} critical alert${critical.length === 1 ? "" : "s"} not acknowledged` : ""].filter(Boolean).join(" · ");
+  return `<div class="notice bad cert-banner" role="alert">
+    <b>SolarWinds: ${title}.</b> <a class="link" href="#/solarwinds">Open SolarWinds</a>
+    <ul>${down.map((n) => `<li><b>${esc(n)}</b> is down</li>`).join("")}
+      ${critical.filter((a) => !down.includes(a.object)).map((a) => `<li><b>${esc(a.object || "")}</b>: ${esc(a.name)}</li>`).join("")}</ul></div>`;
 }
 
 function certBanner(certs) {
@@ -794,7 +808,9 @@ async function renderVSphere() {
     if (topo) {
       box.innerHTML = '<p class="muted">Reading the whole inventory from vCenter…</p>';
       try {
-        showTopology(box, await api("GET", `/api/vsphere/${state.vs}/topology`), conns.find((c) => c.id === state.vs));
+        const [t, sw] = await Promise.all([api("GET", `/api/vsphere/${state.vs}/topology`),
+          api("GET", "/api/solarwinds/status").catch(() => null)]);
+        showTopology(box, t, conns.find((c) => c.id === state.vs), sw);
       } catch (err) { box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
       return;
     }
@@ -829,7 +845,20 @@ function topologyCounts(t) {
   };
 }
 
-function showTopology(box, t, conn) {
+// SolarWinds' view of a VM or host, matched on its short name (like Cross-check does).
+function swLookup(sw, name) {
+  if (!sw?.connections) return null;
+  return sw.nodes[(name || "").split(".")[0].trim().toLowerCase()] || { group: "none", status: "Not monitored" };
+}
+
+function swBadge(sw, name) {
+  const s = swLookup(sw, name);
+  if (!s) return "";
+  const cls = { up: "ok", down: "bad", warning: "warn", unmanaged: "plain", none: "plain sw-none" }[s.group] || "plain";
+  return `<span class="badge ${cls} sw-badge" title="SolarWinds${s.connection ? ` (${esc(s.connection)})` : ""}: ${esc(s.status)}">SW: ${esc(s.group === "none" ? "not monitored" : s.status)}</span>`;
+}
+
+function showTopology(box, t, conn, sw) {
   const n = topologyCounts(t);
   const stat = (label, value, sub = "") =>
     `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
@@ -841,7 +870,7 @@ function showTopology(box, t, conn) {
     q = q.trim().toLowerCase();
     const hit = (name) => !q || (name || "").toLowerCase().includes(q);
     const vmLi = (v) => `<li>${powerBadge(v.power_state)} <b>${esc(v.name)}</b>
-      <span class="muted">${v.cpus ?? "–"} vCPU · ${gb(v.memory_mb)}</span></li>`;
+      <span class="muted">${v.cpus ?? "–"} vCPU · ${gb(v.memory_mb)}</span> ${swBadge(sw, v.name)}</li>`;
     // A search keeps a host if it or any of its VMs match; a matching cluster or host shows everything under it.
     const host = (h, all = false) => {
       const whole = all || hit(h.name);
@@ -849,7 +878,7 @@ function showTopology(box, t, conn) {
       if (q && !whole && !vms.length) return "";
       const ok = h.connection_state === "CONNECTED";
       return `<details class="topo-node" ${q ? "open" : ""}><summary>${kind("host")} <b>${esc(h.name)}</b>
-          <span class="badge ${ok ? "ok" : "bad"}">${esc(h.connection_state || "?")}</span>
+          <span class="badge ${ok ? "ok" : "bad"}">${esc(h.connection_state || "?")}</span> ${swBadge(sw, h.name)}
           <span class="muted">${h.vms.length} VM${h.vms.length === 1 ? "" : "s"} · ${on(h.vms)} on</span></summary>
         ${vms.length ? `<ul class="topo-vms">${vms.map(vmLi).join("")}</ul>` : '<p class="muted topo-empty">No VMs</p>'}</details>`;
     };
@@ -898,7 +927,14 @@ function showTopology(box, t, conn) {
       ${stat("Virtual machines", n.vms.length, `${on(n.vms)} powered on`)}
       ${stat("Datastores", n.stores.length, `${fmtBytes(n.free)} free of ${fmtBytes(n.capacity)}`)}
       ${stat("Networks", n.networks)}
+      ${sw?.connections ? (() => {
+        const running = n.vms.filter((v) => v.power_state === "POWERED_ON");
+        const seen = running.filter((v) => swLookup(sw, v.name).group !== "none");
+        const down = seen.filter((v) => swLookup(sw, v.name).group === "down");
+        return stat("In SolarWinds", `${seen.length} / ${running.length}`, `running VMs monitored${down.length ? ` · ${down.length} down` : ""}`);
+      })() : ""}
     </div>
+    ${sw?.errors?.length ? `<div class="notice bad" style="margin-bottom:12px">Couldn't get SolarWinds status from ${sw.errors.map((e) => esc(e.connection)).join(", ")}: ${esc(sw.errors[0].error)}</div>` : ""}
     <div class="card topo" id="topo-tree"></div>
     <p class="muted small-note">Read from ${esc(t.vcenter)} on ${esc(new Date().toLocaleString())}.</p>`;
   draw("");
@@ -907,11 +943,12 @@ function showTopology(box, t, conn) {
   $("#topo-open").onclick = () => box.querySelectorAll("details").forEach((d) => (d.open = true));
   $("#topo-close").onclick = () => box.querySelectorAll("details details").forEach((d) => (d.open = false));
   $("#topo-print").onclick = () => { box.querySelectorAll("details").forEach((d) => (d.open = true)); window.print(); };
-  $("#topo-csv").onclick = () => downloadTopologyCsv(t);
+  $("#topo-csv").onclick = () => downloadTopologyCsv(t, sw);
 }
 
-function downloadTopologyCsv(t) {
-  const rows = [["Object", "Datacenter", "Cluster", "Host", "Name", "State", "vCPU", "Memory (GB)", "Type", "Capacity (GB)", "Free (GB)"]];
+function downloadTopologyCsv(t, sw) {
+  const rows = [["Object", "Datacenter", "Cluster", "Host", "Name", "State", "vCPU", "Memory (GB)", "Type", "Capacity (GB)", "Free (GB)",
+    ...(sw?.connections ? ["SolarWinds"] : [])]];
   const toGb = (b) => (b == null ? "" : (b / 1024 ** 3).toFixed(1));
   for (const d of t.datacenters) {
     const hostRows = (cluster, h) => {
@@ -928,6 +965,7 @@ function downloadTopologyCsv(t) {
     for (const x of d.datastores) rows.push(["Datastore", d.name, "", "", x.name, "", "", "", x.type || "", toGb(x.capacity), toGb(x.free_space)]);
     for (const x of d.networks) rows.push(["Network", d.name, "", "", x.name, "", "", "", x.type || "", "", ""]);
   }
+  if (sw?.connections) rows.slice(1).forEach((r) => r.push(["Host", "VM"].includes(r[0]) ? swLookup(sw, r[4]).status : ""));
   const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\r\n");
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }));

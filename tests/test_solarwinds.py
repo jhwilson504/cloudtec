@@ -55,7 +55,9 @@ def test_overview():
     assert nodes["BSPDRPCFDNS02"]["group"] == "down"
     assert nodes["BSPDRPCFDNS02"]["cpu"] is None and nodes["BSPDRPCFDNS02"]["response_ms"] is None   # -1/-2 mean "no data"
     assert nodes["SMTP1"]["group"] == "unmanaged" and nodes["SMTP1"]["status"] == "Unmanaged"
-    assert o["summary"] == {"nodes": 3, "up": 1, "down": 1, "warning": 0, "unmanaged": 1, "alerts": 2, "critical_alerts": 1}
+    assert o["summary"] == {"nodes": 3, "up": 1, "down": 1, "warning": 0, "unmanaged": 1, "alerts": 2, "critical_alerts": 1,
+                            "down_nodes": ["BSPDRPCFDNS02"],
+                            "critical": [{"name": "Node is down", "object": "BSPDRPCFDNS02"}]}   # the acknowledged one isn't listed
     assert [a["severity"] for a in o["alerts"]] == ["Critical", "Warning"]
     assert o["alerts"][1]["acknowledged"] is True
     assert o["interfaces_down"] == [{"id": 5, "name": "Gi2/0/2", "node": "SW-POINCIANA", "status": "Down"}]

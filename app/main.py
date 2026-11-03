@@ -765,6 +765,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # --- SolarWinds --------------------------------------------------------
 
+    @app.get("/api/solarwinds/status", dependencies=api)
+    def solarwinds_status():
+        """Every monitored node's status from all SolarWinds connections, keyed by short host name,
+        so other pages (e.g. the vSphere topology) can show it next to the same machine."""
+        nodes, errors = {}, []
+        for conn, found, error in gather(store.list("solarwinds"), lambda c: c.nodes()):
+            if error:
+                errors.append({"connection": conn.name, "error": error})
+                continue
+            for n in found:
+                nodes.setdefault(_short_name(n["name"]), {"status": n["status"], "group": n["group"],
+                                                         "name": n["name"], "connection": conn.name})
+        return {"connections": len(store.list("solarwinds")), "nodes": nodes, "errors": errors}
+
     @app.get("/api/solarwinds/{conn_id}/overview", dependencies=api)
     def solarwinds_overview(conn_id: str):
         with open_connector(get_conn(conn_id, "solarwinds")) as c:

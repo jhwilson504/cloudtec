@@ -391,8 +391,11 @@ def _solarwinds_state(key: str) -> dict:
                  ("SW-POINCIANA-VM_ENVIRONMENT", "Cisco", "Catalyst 3850"), ("ESB_Network", "Cisco", "Catalyst 2960X"),
                  ("DATA_RECOVERY", "Cisco", "Catalyst 3850"), ("ESBSQL01", "Windows", "VMware Virtual Platform"),
                  ("BSPDRPCFDNS02", "Windows", "VMware Virtual Platform"), ("SMTP1", "Windows", "VMware Virtual Platform"),
-                 ("BTCLOADBALANCER", "Citrix", "NetScaler VPX"), ("JFKNAS", "Synology", "RS3617xs")]
-        status = {"BSPDRPCFDNS02": 2, "jfkvh12": 3, "SMTP1": 9}
+                 ("BTCLOADBALANCER", "Citrix", "NetScaler VPX"), ("JFKNAS", "Synology", "RS3617xs"),
+                 # Also some of the demo vCenter's machines, so its Topology tab shows SolarWinds status too.
+                 ("SRV-DC01", "Windows", "VMware Virtual Platform"), ("SRV-SQL01", "Windows", "VMware Virtual Platform"),
+                 ("SRV-WEB02", "Windows", "VMware Virtual Platform"), ("esx01.lab.local", "VMware", "PowerEdge R750")]
+        status = {"BSPDRPCFDNS02": 2, "jfkvh12": 3, "SMTP1": 9, "SRV-WEB02": 2, "SRV-SQL01": 3}
         nodes = []
         for i, (name, vendor, model) in enumerate(names, 1):
             code = status.get(name, 1)

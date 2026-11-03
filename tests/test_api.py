@@ -291,3 +291,14 @@ def test_solarwinds_demo(client):
     card = next(d for d in client.get("/api/dashboard").json() if d["id"] == sw)
     assert card["summary"]["alerts"] == len(o["alerts"]) and card["error"] is None
     assert client.get(f"/api/vsphere/{sw}/vms").status_code == 404         # kinds stay separate
+
+
+def test_solarwinds_status_by_short_name(client):
+    assert client.get("/api/solarwinds/status").json() == {"connections": 0, "nodes": {}, "errors": []}
+    add_demo(client, "solarwinds", "SolarWinds")
+    client.post("/api/connections", json={"kind": "solarwinds", "name": "offline", "password": "x",
+                                          "config": {"host": "127.0.0.1", "port": 1, "username": "u"}})
+    s = client.get("/api/solarwinds/status").json()
+    assert s["connections"] == 2
+    assert s["nodes"]["bspdrpcfdns02"]["group"] == "down" and s["nodes"]["btcproddc1"]["group"] == "up"
+    assert [e["connection"] for e in s["errors"]] == ["offline"]           # one down doesn't hide the other
