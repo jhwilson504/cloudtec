@@ -18,7 +18,7 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 
-KINDS = ("ad", "vsphere", "idrac")
+KINDS = ("ad", "vsphere", "idrac", "solarwinds")
 ROLES = ("admin", "operator")
 
 

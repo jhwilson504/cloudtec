@@ -1,4 +1,4 @@
-"""KasTec Center: one console for Active Directory, vSphere and iDRAC."""
+"""KasTec Center: one console for Active Directory, vSphere, iDRAC and SolarWinds."""
 
 import json
 import logging
@@ -36,6 +36,7 @@ CONFIG_FIELDS = {
     "ad": ("host", "port", "use_ssl", "verify_ssl", "base_dn", "bind_user"),
     "vsphere": ("host", "port", "verify_ssl", "username"),
     "idrac": ("hosts", "verify_ssl", "username"),
+    "solarwinds": ("host", "port", "verify_ssl", "username"),
 }
 
 
@@ -76,7 +77,7 @@ class ShellConnectBody(BaseModel):
 
 
 class ConnectionBody(BaseModel):
-    kind: Literal["ad", "vsphere", "idrac"]
+    kind: Literal["ad", "vsphere", "idrac", "solarwinds"]
     name: str = Field(min_length=1, max_length=80)
     config: dict = {}
     password: str = ""
@@ -761,6 +762,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def vs_clusters(conn_id: str):
         with open_connector(get_conn(conn_id, "vsphere")) as c:
             return c.clusters()
+
+    # --- SolarWinds --------------------------------------------------------
+
+    @app.get("/api/solarwinds/{conn_id}/overview", dependencies=api)
+    def solarwinds_overview(conn_id: str):
+        with open_connector(get_conn(conn_id, "solarwinds")) as c:
+            return c.overview()
 
     # --- iDRAC -------------------------------------------------------------
 

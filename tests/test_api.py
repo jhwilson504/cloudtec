@@ -282,3 +282,12 @@ def test_backend_errors_are_logged_with_their_reason(client, caplog):
         r = client.get(f"/api/vsphere/{vs}/hosts")
     assert r.status_code == 502
     assert f"GET /api/vsphere/{vs}/hosts" in caplog.text and "Could not reach vCenter" in caplog.text
+
+
+def test_solarwinds_demo(client):
+    sw = add_demo(client, "solarwinds", "SolarWinds")
+    o = client.get(f"/api/solarwinds/{sw}/overview").json()
+    assert o["summary"]["nodes"] == len(o["nodes"]) and o["summary"]["down"] >= 1
+    card = next(d for d in client.get("/api/dashboard").json() if d["id"] == sw)
+    assert card["summary"]["alerts"] == len(o["alerts"]) and card["error"] is None
+    assert client.get(f"/api/vsphere/{sw}/vms").status_code == 404         # kinds stay separate

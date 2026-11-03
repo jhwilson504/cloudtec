@@ -2,7 +2,7 @@
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const view = $("#view");
-const state = { ad: null, vs: null, idrac: null, adTab: "users", vsTab: "vms", connKind: "ad" };
+const state = { ad: null, vs: null, idrac: null, sw: null, adTab: "users", vsTab: "vms", connKind: "ad" };
 
 // ---- helpers -------------------------------------------------------------
 
@@ -121,10 +121,10 @@ function connectionPicker(conns, selected, id) {
 
 const isAdmin = () => state.me?.role === "admin";
 
-const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers" };
+const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers", solarwinds: "SolarWinds" };
 
 function noConnections(kind) {
-  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC" }[kind];
+  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds server" }[kind];
   const article = kind === "idrac" ? "an" : "a";
   if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a KasTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
@@ -245,6 +245,7 @@ async function renderDashboard() {
   const ad = ok.filter((i) => i.kind === "ad").map((i) => i.summary);
   const vs = ok.filter((i) => i.kind === "vsphere").map((i) => i.summary);
   const srv = ok.filter((i) => i.kind === "idrac").map((i) => i.summary);
+  const sw = ok.filter((i) => i.kind === "solarwinds").map((i) => i.summary);
   const sum = (arr, k) => arr.reduce((a, s) => a + (s[k] || 0), 0);
   const cap = sum(vs, "capacity"), free = sum(vs, "free_space");
 
@@ -261,6 +262,12 @@ async function renderDashboard() {
         <dt>Locked out</dt><dd>${s.locked ? `<span class="badge warn">${s.locked}</span>` : 0}</dd>
         <dt>Computers</dt><dd>${fmtNum(s.computers)}</dd>
         <dt>Groups</dt><dd>${fmtNum(s.groups)}</dd></dl>`;
+    else if (i.kind === "solarwinds") body = `<dl>
+        <dt>Nodes</dt><dd>${s.up} up / ${s.nodes}</dd>
+        <dt>Down</dt><dd>${s.down ? `<span class="badge bad">${s.down}</span>` : 0}</dd>
+        <dt>Warning</dt><dd>${s.warning ? `<span class="badge warn">${s.warning}</span>` : 0}</dd>
+        <dt>Active alerts</dt><dd>${s.alerts}${s.critical_alerts ? ` <span class="badge bad">${s.critical_alerts} critical</span>` : ""}</dd>
+        <dt>Unmanaged</dt><dd>${s.unmanaged}</dd></dl>`;
     else if (i.kind === "idrac") body = `<dl>
         <dt>Servers</dt><dd>${s.reachable} reachable / ${s.servers}</dd>
         <dt>Healthy</dt><dd>${s.healthy}</dd>
@@ -276,7 +283,7 @@ async function renderDashboard() {
         <dt>Storage used</dt><dd>${fmtBytes(s.capacity - s.free_space)} / ${fmtBytes(s.capacity)}</dd></dl>
         <div class="meter ${used > 85 ? "hot" : ""}"><div style="width:${used.toFixed(1)}%"></div></div>`;
     }
-    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers" }[i.kind];
+    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers", solarwinds: "#/solarwinds" }[i.kind];
     return `<div class="card conn-card"><div class="head">
         <div><a class="link" href="${link}" data-pick="${i.kind}:${esc(i.id)}"><b>${esc(i.name)}</b></a>
           <div class="sub muted">${KIND_LABELS[i.kind]}${i.demo ? " · demo" : ""}</div></div>
@@ -295,12 +302,13 @@ async function renderDashboard() {
       ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
       ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
       ${srv.length ? stat("Physical servers", fmtNum(sum(srv, "servers")), `${fmtNum(sum(srv, "attention"))} need attention`) : ""}
+      ${sw.length ? stat("Monitored nodes", fmtNum(sum(sw, "nodes")), `${fmtNum(sum(sw, "down"))} down · ${fmtNum(sum(sw, "alerts"))} alerts`) : ""}
     </div>
     <div class="grid">${certTile(certs)}${cards}${resetTile()}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
-    state[{ ad: "ad", vsphere: "vs", idrac: "idrac" }[kind]] = id;
+    state[{ ad: "ad", vsphere: "vs", idrac: "idrac", solarwinds: "sw" }[kind]] = id;
   }));
 }
 
@@ -998,6 +1006,96 @@ async function showVm(connId, vmId) {
   }
 }
 
+// ---- SolarWinds --------------------------------------------------------------
+
+const SW_BADGE = { up: "ok", down: "bad", warning: "warn", unmanaged: "plain", other: "plain" };
+const SEVERITY_BADGE = { Critical: "bad", Serious: "bad", Warning: "warn", Notice: "info", Informational: "plain" };
+
+async function renderSolarWinds() {
+  loading();
+  const conns = (await api("GET", "/api/connections")).filter((c) => c.kind === "solarwinds");
+  const head = `<div class="page-head"><div><h1>SolarWinds</h1>
+      <p class="muted" style="margin:0">Node health, active alerts and down interfaces from SolarWinds. Read-only.</p></div>
+      ${conns.length ? '<button class="btn" id="sw-refresh">Refresh</button>' : ""}</div>`;
+  if (!conns.length) { view.innerHTML = head + noConnections("solarwinds"); return; }
+  if (!conns.some((c) => c.id === state.sw)) state.sw = conns[0].id;
+  let filter = "problems";
+
+  view.innerHTML = `${head}
+    <div class="toolbar">${connectionPicker(conns, state.sw, "sw-conn")}</div>
+    <div id="sw-body"><p class="muted">Asking SolarWinds…</p></div>`;
+
+  async function load() {
+    const box = $("#sw-body");
+    box.innerHTML = '<p class="muted">Asking SolarWinds…</p>';
+    let o;
+    try {
+      o = await api("GET", `/api/solarwinds/${state.sw}/overview`);
+    } catch (err) {
+      const conn = conns.find((c) => c.id === state.sw);
+      box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>
+        <p class="muted small-note">If ${esc(conn?.config?.host || "the SolarWinds server")} is powered off or SolarWinds isn't installed on it yet,
+        this page fills in once it's running. Its API listens on port ${esc(conn?.config?.port || 17774)}.</p>`;
+      return;
+    }
+    const s = o.summary;
+    const stat = (label, value, sub = "") =>
+      `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+    const pct = (v) => (v == null ? '<span class="muted">–</span>' : `${v}%`);
+
+    const draw = () => {
+      const q = ($("#sw-q")?.value || "").trim().toLowerCase();
+      const nodes = o.nodes.filter((n) => (filter === "all" || n.group !== "up")
+        && (!q || [n.name, n.ip, n.vendor, n.machine_type].some((f) => (f || "").toLowerCase().includes(q))));
+      $("#sw-nodes").innerHTML = table(["Node", "Status", "Vendor / model", "CPU", "Memory", "Response", "Loss"], nodes.map((n) => `<tr>
+          <td><b>${esc(n.name)}</b><div class="sub mono">${esc(n.ip || "")}</div></td>
+          <td><span class="badge ${SW_BADGE[n.group]}">${esc(n.status)}</span></td>
+          <td>${esc(n.vendor || "")}<div class="sub">${esc(n.machine_type || "")}</div></td>
+          <td class="${(n.cpu ?? 0) > 85 ? "error" : ""}">${pct(n.cpu)}</td>
+          <td class="${(n.memory ?? 0) > 90 ? "error" : ""}">${pct(n.memory)}</td>
+          <td>${n.response_ms == null ? '<span class="muted">–</span>' : `${n.response_ms} ms`}</td>
+          <td>${n.loss ? `<span class="${n.loss >= 100 ? "error" : ""}">${n.loss}%</span>` : "0%"}</td></tr>`),
+        filter === "all" ? "No nodes match." : "Every node is up. 🎉");
+    };
+
+    box.innerHTML = `<div class="stats">
+        ${stat("Nodes", s.nodes, `${s.up} up`)}
+        ${stat("Down", s.down, "not responding")}
+        ${stat("Warning", s.warning, "degraded")}
+        ${stat("Unmanaged", s.unmanaged, "monitoring paused")}
+        ${stat("Active alerts", s.alerts, `${s.critical_alerts} critical or serious`)}
+        ${o.interfaces_down ? stat("Interfaces down", o.interfaces_down.length) : ""}
+      </div>
+      <div class="section"><h2>Active alerts (${o.alerts.length})</h2>
+        ${table(["Alert", "Severity", "On", "Triggered", "Acknowledged"], o.alerts.map((a) => `<tr>
+          <td><b>${esc(a.name)}</b></td>
+          <td><span class="badge ${SEVERITY_BADGE[a.severity] || "plain"}">${esc(a.severity)}</span></td>
+          <td>${esc(a.object || "")}${a.node && a.node !== a.object ? `<div class="sub">${esc(a.node)}</div>` : ""}</td>
+          <td>${a.triggered ? fmtDate(a.triggered) : "–"}</td>
+          <td>${a.acknowledged ? `<span class="badge plain">by ${esc(a.acknowledged_by || "someone")}</span>` : '<span class="badge warn">No</span>'}</td></tr>`),
+          "No active alerts.")}</div>
+      ${o.interfaces_down ? `<div class="section"><h2>Interfaces down (${o.interfaces_down.length})</h2>
+        ${table(["Interface", "Node", "Status"], o.interfaces_down.map((i) => `<tr><td><b>${esc(i.name)}</b></td>
+          <td>${esc(i.node || "")}</td><td><span class="badge bad">${esc(i.status)}</span></td></tr>`), "No interfaces are down.")}</div>` : ""}
+      <div class="section"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Nodes</h2>
+        <div class="row"><div class="segmented" id="sw-filter"><button data-f="problems" class="active">Problems only</button><button data-f="all">All ${s.nodes}</button></div>
+        <input type="search" id="sw-q" placeholder="Find a node…" style="width:220px"></div></div>
+        <div id="sw-nodes" style="margin-top:10px"></div></div>
+      <p class="muted small-note">From ${esc(o.server)} at ${esc(new Date().toLocaleTimeString())}.</p>`;
+    $("#sw-filter").querySelectorAll("button").forEach((b) => b.onclick = () => {
+      filter = b.dataset.f;
+      $("#sw-filter").querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+      draw();
+    });
+    $("#sw-q").oninput = debounce(draw, 200);
+    draw();
+  }
+
+  $("#sw-conn")?.addEventListener("change", (e) => { state.sw = e.target.value; load(); });
+  $("#sw-refresh").onclick = load;
+  load();
+}
+
 // ---- servers (iDRAC) -------------------------------------------------------
 
 const HEALTH = { OK: ["ok", "Healthy"], Warning: ["warn", "Warning"], Critical: ["bad", "Critical"] };
@@ -1333,7 +1431,7 @@ async function renderConnections() {
     <div class="card section">
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <h2 style="margin:0">Add a connection</h2>
-        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button></div>
+        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button><button data-k="solarwinds">SolarWinds</button></div>
       </div>
       <form id="conn-form" class="form" autocomplete="off"></form>
     </div>`;
@@ -1359,23 +1457,23 @@ async function renderConnections() {
 
   function drawForm() {
     kindBtns.forEach((b) => b.classList.toggle("active", b.dataset.k === state.connKind));
-    const ad = state.connKind === "ad", idrac = state.connKind === "idrac";
+    const ad = state.connKind === "ad", idrac = state.connKind === "idrac", sw = state.connKind === "solarwinds";
     const where = idrac
       ? `<label class="full"><span>iDRAC addresses, one per line (they must all use the account below)</span>
           <textarea name="hosts" rows="4" spellcheck="false" placeholder="10.0.10.11
 10.0.10.12"></textarea></label>`
-      : `<label>${ad ? "Domain controller" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : "vcenter.corp.example.com"}"></label>
-      <label>Port <input name="port" type="number" placeholder="${ad ? "636" : "443"}"></label>`;
+      : `<label>${ad ? "Domain controller" : sw ? "SolarWinds server" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : sw ? "btc-sw-app.btcbahamas.com" : "vcenter.corp.example.com"}"></label>
+      <label>Port <input name="port" type="number" placeholder="${ad ? "636" : sw ? "17774" : "443"}"></label>`;
     $("#conn-form").innerHTML = `
-      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : "Production vCenter"}"></label>
+      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : sw ? "SolarWinds" : "Production vCenter"}"></label>
       ${where}
       ${ad ? `<label class="full">Base DN <input name="base_dn" placeholder="DC=corp,DC=example,DC=com"></label>
         <label>Bind account <input name="bind_user" placeholder="svc-cloudtec@corp.example.com"></label>`
-           : `<label>Username <input name="username" placeholder="${idrac ? "root, or a read-only iDRAC user" : "administrator@vsphere.local"}"></label>`}
+           : `<label>Username <input name="username" placeholder="${idrac ? "root, or a read-only iDRAC user" : sw ? "a SolarWinds web console account (read-only is enough)" : "administrator@vsphere.local"}"></label>`}
       <label>Password <input name="password" type="password" autocomplete="new-password"></label>
       <div class="full row" style="gap:20px">
         ${ad ? '<label class="inline"><input type="checkbox" name="use_ssl" checked> Use LDAPS (required for password resets)</label>' : ""}
-        <label class="inline"><input type="checkbox" name="verify_ssl" ${idrac ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : ""}</label>
+        <label class="inline"><input type="checkbox" name="verify_ssl" ${idrac || sw ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : sw ? " (SolarWinds' API uses its own self-signed certificate unless you replaced it)" : ""}</label>
         <label class="inline"><input type="checkbox" name="demo"> Demo mode (sample data, no server needed)</label>
       </div>
       <div class="full" id="form-msg"></div>
@@ -1384,7 +1482,7 @@ async function renderConnections() {
     const form = $("#conn-form");
     form.demo.onchange = () => {
       form.querySelectorAll("input:not([name=demo]):not([name=name]), textarea").forEach((el) => el.disabled = form.demo.checked);
-      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : "Demo vCenter";
+      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : sw ? "Demo SolarWinds" : "Demo vCenter";
     };
     const body = () => {
       const f = new FormData(form);
@@ -1889,6 +1987,7 @@ const routes = {
   directory: renderDirectory,
   vsphere: renderVSphere,
   servers: renderServers,
+  solarwinds: renderSolarWinds,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
   powershell: renderShell,

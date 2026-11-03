@@ -378,3 +378,76 @@ class DemoIDRAC:
                 ("BOSS-S2", "2.5.13.4008"), ("Power Supply.Slot.1", "00.1D.9E"), ("Power Supply.Slot.2", "00.1D.9E"),
                 (f"Lifecycle Controller ({tag})", server["idrac_firmware"])]],
         }
+
+
+def _solarwinds_state(key: str) -> dict:
+    with _lock:
+        if key in _state:
+            return _state[key]
+        rng = random.Random(f"sw-{key}")
+        names = [("BTCPRODDC1", "Windows", "VMware Virtual Platform"), ("BTCPRODDC2", "Windows", "VMware Virtual Platform"),
+                 ("jfkvh10", "VMware", "PowerEdge R720"), ("jfkvh11", "VMware", "PowerEdge R720"),
+                 ("jfkvh12", "VMware", "PowerEdge R910"), ("pdvh10", "VMware", "PowerEdge R720"),
+                 ("SW-POINCIANA-VM_ENVIRONMENT", "Cisco", "Catalyst 3850"), ("ESB_Network", "Cisco", "Catalyst 2960X"),
+                 ("DATA_RECOVERY", "Cisco", "Catalyst 3850"), ("ESBSQL01", "Windows", "VMware Virtual Platform"),
+                 ("BSPDRPCFDNS02", "Windows", "VMware Virtual Platform"), ("SMTP1", "Windows", "VMware Virtual Platform"),
+                 ("BTCLOADBALANCER", "Citrix", "NetScaler VPX"), ("JFKNAS", "Synology", "RS3617xs")]
+        status = {"BSPDRPCFDNS02": 2, "jfkvh12": 3, "SMTP1": 9}
+        nodes = []
+        for i, (name, vendor, model) in enumerate(names, 1):
+            code = status.get(name, 1)
+            nodes.append({
+                "id": i, "name": name, "ip": f"10.50.241.{20 + i}" if vendor != "Cisco" else f"10.0.19.{200 + i}",
+                "status": {1: "Up", 2: "Down", 3: "Warning", 9: "Unmanaged"}[code], "status_code": code,
+                "group": {1: "up", 2: "down", 3: "warning", 9: "unmanaged"}[code],
+                "vendor": vendor, "machine_type": model,
+                "cpu": None if code == 2 else round(rng.uniform(3, 92 if code == 3 else 45), 1),
+                "memory": None if code == 2 else round(rng.uniform(30, 88), 1),
+                "response_ms": None if code == 2 else round(rng.uniform(1, 30), 1),
+                "loss": 100.0 if code == 2 else 0.0,
+                "last_boot": None,
+            })
+        alerts = [
+            {"id": 1, "name": "Node is down", "severity": "Critical", "object": "BSPDRPCFDNS02", "node": "BSPDRPCFDNS02",
+             "triggered": "2026-11-03T08:12:00", "acknowledged": False, "acknowledged_by": None},
+            {"id": 2, "name": "High CPU utilization", "severity": "Warning", "object": "jfkvh12", "node": "jfkvh12",
+             "triggered": "2026-11-03T09:40:00", "acknowledged": True, "acknowledged_by": "BTC\\twells"},
+            {"id": 3, "name": "Interface is down", "severity": "Warning", "object": "GigabitEthernet2/0/2",
+             "node": "SW-POINCIANA-VM_ENVIRONMENT", "triggered": "2026-11-02T22:05:00", "acknowledged": False,
+             "acknowledged_by": None},
+        ]
+        interfaces = [{"id": 101, "name": "GigabitEthernet2/0/2", "node": "SW-POINCIANA-VM_ENVIRONMENT", "status": "Down"}]
+        _state[key] = {"nodes": nodes, "alerts": alerts, "interfaces": interfaces}
+        return _state[key]
+
+
+class DemoSolarWinds:
+    def __init__(self, conn_id: str, config: dict):
+        self.data = _solarwinds_state(conn_id)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def test(self) -> dict:
+        return {"ok": True, "message": f"Demo SolarWinds with {len(self.data['nodes'])} nodes (no real server contacted)"}
+
+    def nodes(self) -> list[dict]:
+        return [dict(n) for n in self.data["nodes"]]
+
+    def alerts(self) -> list[dict]:
+        return [dict(a) for a in self.data["alerts"]]
+
+    def interfaces_down(self) -> list[dict]:
+        return [dict(i) for i in self.data["interfaces"]]
+
+    def overview(self) -> dict:
+        from .solarwinds import summarize
+        return {"server": "solarwinds.demo", "summary": summarize(self.nodes(), self.alerts()), "nodes": self.nodes(),
+                "alerts": self.alerts(), "interfaces_down": self.interfaces_down()}
+
+    def summary(self) -> dict:
+        from .solarwinds import summarize
+        return summarize(self.nodes(), self.alerts())
