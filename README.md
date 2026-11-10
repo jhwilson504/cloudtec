@@ -93,6 +93,23 @@ The setup opens TCP **8443** in Windows Firewall (Domain and Private networks) a
 
 KasTec only runs while its window is open on that PC, so for a team a small always-on server or VM is a better home for it.
 
+## Running KasTec on a server or VM
+
+So KasTec has its own address (e.g. `https://smitvmv.btcbahamas.com:8443` or `https://10.0.18.49:8443`) and keeps running when your PC is off:
+
+1. On the server/VM, install Python **for all users** (python.org installer → *Customize installation* → tick *Install Python for all users* and *Add Python to environment variables*).
+2. Put KasTec in a folder such as `C:\KasTec`: download it, or copy your existing KasTec folder **including `data`** so your connections, users and passwords come along.
+3. Right-click **Install KasTec as a service** → *Run as administrator*. It:
+   - installs KasTec's components;
+   - runs the HTTPS setup when needed. A `data` folder copied from another PC has that PC's certificate, so a new one is made for this computer's name and IP addresses, and the firewall port is opened;
+   - asks which account to run as (Enter for SYSTEM, or `DOMAIN\name` for a service account) and whether administrators may use the PowerShell page from other computers;
+   - locks the `data` folder down to SYSTEM, Administrators and that account;
+   - creates the scheduled task **KasTec Center**, which starts KasTec when Windows starts (nobody needs to be signed in), restarts it if it stops and checks for updates each time it starts;
+   - prints the addresses to open, and saves them in `KasTec runs as a service.txt`.
+4. To update or restart it, run **Install KasTec as a service** as administrator again and press Enter. To go back to starting it by hand, run it and type **R**. The log is `data\kastec.log`.
+
+Put the VM on a network that reaches the domain controllers on all AD ports (389, 636, 3268, 88, 9389, and 135 plus 49152–65535 for RPC) so the AD cmdlets, the guided DC restart and the replication checks all work from it. To change the HTTPS settings later, run **Set up network access** as administrator, since `data` is locked down.
+
 ## Certificate expiry alerts
 
 KasTec watches certificates and warns **30 days** and again **21 days** before each one expires, and once more if it does expire: a banner on everyone's dashboard, and an email when `KASTEC_SMTP_HOST` is set. KasTec only alerts; it never installs or changes a certificate.

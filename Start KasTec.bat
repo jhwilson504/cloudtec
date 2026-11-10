@@ -3,17 +3,30 @@ rem Double-click to start KasTec Center and open it in your browser.
 rem It first updates itself from GitHub when there's a newer version; the data folder is never touched.
 rem To turn automatic updates off, create an empty file called "no-auto-update" in the data folder.
 rem Keep the window open while you use KasTec; closing the window stops it.
+rem Where "Install KasTec as a service" was run, Windows starts this file as "Start KasTec.bat service" at startup instead.
 setlocal
+if /i "%~1"=="service" set "KASTEC_SERVICE=1"
 
 rem Run from a temporary copy, so the update can safely replace this file.
 if not defined KASTEC_LAUNCHED (
   set "KASTEC_LAUNCHED=1"
   set "KASTEC_HOME=%~dp0"
   copy /y "%~f0" "%TEMP%\KasTec-launcher.bat" >nul
-  "%TEMP%\KasTec-launcher.bat"
+  "%TEMP%\KasTec-launcher.bat" %*
   exit /b
 )
 title KasTec Center
+
+rem On a server where KasTec runs in the background, don't start a second copy.
+if not defined KASTEC_SERVICE if exist "%KASTEC_HOME%KasTec runs as a service.txt" (
+  echo KasTec runs in the background on this computer ^(it starts with Windows^).
+  echo.
+  type "%KASTEC_HOME%KasTec runs as a service.txt"
+  echo.
+  echo To update or restart it, right-click "Install KasTec as a service" and choose Run as administrator.
+  pause
+  exit /b 0
+)
 
 rem Find the KasTec folder, stop a KasTec that's already running, and update or repair it (PowerShell part at the end of this file).
 del "%TEMP%\KasTec-home.txt" "%TEMP%\KasTec-updated.txt" >nul 2>nul
@@ -21,7 +34,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "$s = Get-Content -Litera
 if errorlevel 1 (
   echo.
   echo KasTec couldn't be prepared. Send a screenshot of this window for help.
-  pause
+  if not defined KASTEC_SERVICE pause
   exit /b 1
 )
 set /p KASTEC_HOME=<"%TEMP%\KasTec-home.txt"
@@ -30,6 +43,8 @@ if exist "Start CloudTec.bat" del "Start CloudTec.bat"
 
 call :find_python || exit /b 1
 
+if defined KASTEC_SERVICE goto :service
+
 %PY% -m app.run --open-browser
 
 echo.
@@ -37,9 +52,25 @@ echo KasTec has stopped.
 pause
 exit /b 0
 
+:service
+rem Background mode: no window, no browser. Output goes to data\kastec.log; KasTec is restarted if it stops.
+if exist "data\service-env.bat" call "data\service-env.bat"
+:serve
+if exist "data\kastec.log" for %%F in ("data\kastec.log") do if %%~zF GTR 5000000 move /y "data\kastec.log" "data\kastec.log.1" >nul
+echo [%DATE% %TIME%] Starting KasTec>>"data\kastec.log"
+%PY% -m app.run >>"data\kastec.log" 2>&1
+echo [%DATE% %TIME%] KasTec stopped (exit code %ERRORLEVEL%), starting it again in 30 seconds>>"data\kastec.log"
+ping -n 31 127.0.0.1 >nul
+goto :serve
+
 :find_python
-rem Find Python: the "py" launcher first, then "python". Install KasTec's components on first run or after an update.
+rem Find Python: the one the server install recorded, else the "py" launcher, else "python".
+rem Install KasTec's components on first run or after an update.
 set "PY="
+if exist "data\python-path.txt" (
+  set /p PY=<"data\python-path.txt"
+  goto :have_python
+)
 py --version >nul 2>nul
 if not errorlevel 1 (
   set "PY=py"
@@ -47,6 +78,7 @@ if not errorlevel 1 (
   python --version >nul 2>nul
   if not errorlevel 1 set "PY=python"
 )
+:have_python
 if not defined PY (
   echo Python is not installed.
   echo.
@@ -54,7 +86,7 @@ if not defined PY (
   echo On the first screen of the installer, tick "Add python.exe to PATH".
   echo Then double-click this file again.
   echo.
-  pause
+  if not defined KASTEC_SERVICE pause
   exit /b 1
 )
 set "NEED_PIP="
@@ -68,7 +100,7 @@ if defined NEED_PIP (
   if errorlevel 1 (
     echo.
     echo Installing failed. Send a screenshot of this window for help.
-    pause
+    if not defined KASTEC_SERVICE pause
     exit /b 1
   )
   del "%TEMP%\KasTec-updated.txt" >nul 2>nul
