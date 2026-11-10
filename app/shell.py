@@ -149,6 +149,94 @@ Install it once (no Administrator needed):
 The saved credential is already available as $KasTec[{name}].Credential."""
 
 
+# Plain-LDAP commands set up by Connect for Active Directory. The AD cmdlets (Get-ADUser, ...) talk to
+# AD Web Services on TCP 9389, which firewalls between networks often block; these only need LDAP (389).
+# They use $global:KasTecLdap (Server, Base, Credential), set by Connect to the DC that was picked.
+LDAP_HELPERS = r"""
+function global:ConvertTo-LdapFilterValue([string]$Value) {
+  -join ($Value.ToCharArray() | ForEach-Object { if ('\*()'.IndexOf($_) -ge 0 -or [int]$_ -eq 0) { '\{0:x2}' -f [int]$_ } else { $_ } })
+}
+function global:Invoke-KasTecLdap([string]$Filter, [string[]]$Properties) {
+  $l = $global:KasTecLdap
+  if (-not $l) { throw 'Click Connect for an Active Directory connection first.' }
+  $root = New-Object System.DirectoryServices.DirectoryEntry("LDAP://$($l.Server)/$($l.Base)", $l.Credential.UserName, $l.Credential.GetNetworkCredential().Password)
+  $s = New-Object System.DirectoryServices.DirectorySearcher($root, $Filter)
+  $s.PageSize = 1000
+  if ($Properties) { $s.PropertiesToLoad.AddRange($Properties) }
+  try { $s.FindAll() | ForEach-Object { $_.Properties } } finally { $s.Dispose(); $root.Dispose() }
+}
+function global:Get-KasTecLdapValue($p, [string]$n) { $v = $p[$n]; if ($null -ne $v -and @($v).Count) { @($v)[0] } }
+function global:ConvertFrom-KasTecFileTime($v) { if ($v -and [int64]$v -gt 0 -and [int64]$v -lt [int64]::MaxValue) { [DateTime]::FromFileTime([int64]$v) } }
+function global:Get-KasTecLdapMatch([string]$Name, [string[]]$Attributes) {
+  if (-not $Name -or $Name -eq '*') { return '' }
+  $v = ConvertTo-LdapFilterValue $Name
+  '(|' + (-join ($Attributes | ForEach-Object { "($_=$v)($_=*$v*)" })) + ')'
+}
+
+function global:Find-LdapUser {
+  <# Users whose username or display name contains -Name ('*' for everyone). Uses plain LDAP. #>
+  param([Parameter(Mandatory, Position = 0)][string]$Name)
+  $m = Get-KasTecLdapMatch $Name 'sAMAccountName', 'displayName'
+  Invoke-KasTecLdap "(&(objectCategory=person)(objectClass=user)$m)" 'samaccountname', 'displayname', 'mail', 'useraccountcontrol', 'lockouttime', 'lastlogontimestamp', 'msds-user-account-control-computed', 'distinguishedname' |
+    ForEach-Object { [pscustomobject]@{
+      User = Get-KasTecLdapValue $_ 'samaccountname'; Name = Get-KasTecLdapValue $_ 'displayname'; Mail = Get-KasTecLdapValue $_ 'mail'
+      Disabled = [bool]([int](Get-KasTecLdapValue $_ 'useraccountcontrol') -band 2)
+      Locked = [bool]([int](Get-KasTecLdapValue $_ 'msds-user-account-control-computed') -band 0x10)
+      LastLogon = ConvertFrom-KasTecFileTime (Get-KasTecLdapValue $_ 'lastlogontimestamp')
+      Path = Get-KasTecLdapValue $_ 'distinguishedname' } }
+}
+
+function global:Get-LdapLockedUser {
+  <# Accounts that are locked out right now. Uses plain LDAP. #>
+  Invoke-KasTecLdap '(&(objectCategory=person)(objectClass=user)(lockoutTime>=1))' 'samaccountname', 'displayname', 'lockouttime', 'msds-user-account-control-computed', 'distinguishedname' |
+    Where-Object { [int](Get-KasTecLdapValue $_ 'msds-user-account-control-computed') -band 0x10 } |
+    ForEach-Object { [pscustomobject]@{
+      User = Get-KasTecLdapValue $_ 'samaccountname'; Name = Get-KasTecLdapValue $_ 'displayname'
+      LockedAt = ConvertFrom-KasTecFileTime (Get-KasTecLdapValue $_ 'lockouttime'); Path = Get-KasTecLdapValue $_ 'distinguishedname' } }
+}
+
+function global:Find-LdapGroup {
+  <# Groups whose name contains -Name ('*' for all). Uses plain LDAP. #>
+  param([Parameter(Mandatory, Position = 0)][string]$Name)
+  $m = Get-KasTecLdapMatch $Name 'sAMAccountName', 'cn'
+  Invoke-KasTecLdap "(&(objectCategory=group)$m)" 'samaccountname', 'description', 'member', 'distinguishedname' |
+    ForEach-Object { [pscustomobject]@{
+      Name = Get-KasTecLdapValue $_ 'samaccountname'; Description = Get-KasTecLdapValue $_ 'description'
+      Members = @($_['member']).Where({ $_ }).Count; Path = Get-KasTecLdapValue $_ 'distinguishedname' } }
+}
+
+function global:Get-LdapGroupMember {
+  <# Direct members of the group named -Group (its exact name). Uses plain LDAP. #>
+  param([Parameter(Mandatory, Position = 0)][string]$Group)
+  $v = ConvertTo-LdapFilterValue $Group
+  $g = @(Invoke-KasTecLdap "(&(objectCategory=group)(|(sAMAccountName=$v)(cn=$v)))" 'distinguishedname')
+  if (-not $g.Count) { throw "No group named '$Group'. Find-LdapGroup $Group lists similar names." }
+  $dn = ConvertTo-LdapFilterValue (Get-KasTecLdapValue $g[0] 'distinguishedname')
+  Invoke-KasTecLdap "(memberOf=$dn)" 'samaccountname', 'displayname', 'objectclass', 'useraccountcontrol', 'distinguishedname' |
+    ForEach-Object { [pscustomobject]@{
+      Name = Get-KasTecLdapValue $_ 'samaccountname'; DisplayName = Get-KasTecLdapValue $_ 'displayname'
+      Type = @($_['objectclass'])[-1]; Disabled = [bool]([int](Get-KasTecLdapValue $_ 'useraccountcontrol') -band 2)
+      Path = Get-KasTecLdapValue $_ 'distinguishedname' } } | Sort-Object Type, Name
+}
+
+function global:Find-LdapComputer {
+  <# Computers whose name contains -Name ('*' for all). Uses plain LDAP. #>
+  param([Parameter(Mandatory, Position = 0)][string]$Name)
+  $m = Get-KasTecLdapMatch $Name 'cn', 'dNSHostName'
+  Invoke-KasTecLdap "(&(objectCategory=computer)$m)" 'cn', 'dnshostname', 'operatingsystem', 'useraccountcontrol', 'lastlogontimestamp', 'distinguishedname' |
+    ForEach-Object { [pscustomobject]@{
+      Name = Get-KasTecLdapValue $_ 'cn'; DNSName = Get-KasTecLdapValue $_ 'dnshostname'; OS = Get-KasTecLdapValue $_ 'operatingsystem'
+      Disabled = [bool]([int](Get-KasTecLdapValue $_ 'useraccountcontrol') -band 2)
+      LastLogon = ConvertFrom-KasTecFileTime (Get-KasTecLdapValue $_ 'lastlogontimestamp')
+      Path = Get-KasTecLdapValue $_ 'distinguishedname' } }
+}
+"""
+
+LDAP_READY = ("Also ready over plain LDAP (works even where AD Web Services, port 9389, is blocked): "
+              "Find-LdapUser <name>, Get-LdapLockedUser, Find-LdapGroup <name>, Get-LdapGroupMember <group>, "
+              "Find-LdapComputer <name>. Use * as the name for all.")
+
+
 def connect_script(conn, host: str | None = None) -> str:
     """PowerShell that signs this session in to a saved connection.
 
@@ -162,7 +250,10 @@ def connect_script(conn, host: str | None = None) -> str:
     name = ps_quote(conn.name)
     user = cfg.get("bind_user") if conn.kind == "ad" else cfg.get("username")
     if conn.kind == "ad":
+        base = ",".join(p.strip() for p in str(cfg.get("base_dn", "")).split(",") if p.strip().lower().startswith("dc=")) \
+            or cfg.get("base_dn", "")
         body = f"""
+  $global:KasTecLdap = @{{ Server = {ps_quote(host)}; Base = {ps_quote(base)}; Credential = $__cred }}{LDAP_HELPERS}
   if (Get-Module -ListAvailable -Name ActiveDirectory) {{
     Import-Module ActiveDirectory -WarningAction SilentlyContinue
     $PSDefaultParameterValues['*-AD*:Server'] = {ps_quote(host)}
@@ -171,7 +262,9 @@ def connect_script(conn, host: str | None = None) -> str:
     'Active Directory commands such as Get-ADUser now use this domain automatically.'
   }} else {{
     {ps_quote(AD_MISSING.replace("{name}", name))}
-  }}"""
+  }}
+  ''
+  {ps_quote(LDAP_READY)}"""
     else:
         cert = "Ignore" if cfg.get("verify_ssl") is False else "Fail"
         body = f"""

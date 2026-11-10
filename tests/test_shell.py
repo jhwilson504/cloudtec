@@ -206,3 +206,32 @@ def test_connect_api_picks_only_known_dcs(tmp_path):
         assert r.status_code == 200, r.text
         assert c.post("/api/shell/connect", json={"connection_id": ad["id"], "dc": "evil.example.com"}).status_code == 422
         assert "Corp via DC02.corp.example.com" in (tmp_path / "audit.log").read_text()
+
+
+FAKE_LDAP = r"""
+function global:Invoke-KasTecLdap([string]$Filter, [string[]]$Properties) {
+  $global:LastLdapFilter = $Filter
+  @{ samaccountname = @('jdoe'); displayname = @('John Doe'); useraccountcontrol = @(514)
+     'msds-user-account-control-computed' = @(16); lockouttime = @(133000000000000000)
+     member = @('CN=a', 'CN=b'); objectclass = @('top', 'person', 'user'); distinguishedname = @('CN=John Doe,DC=corp,DC=example,DC=com') },
+  @{ samaccountname = @('ok'); useraccountcontrol = @(512); 'msds-user-account-control-computed' = @(0) }
+}
+"""
+
+
+@needs_pwsh
+def test_connect_ad_sets_up_ldap_commands(session):
+    r = session.run(connect_script(conn("ad", base_dn="OU=Staff,DC=corp,DC=example,DC=com"), "dc02.corp.example.com"))
+    assert "Find-LdapUser" in r["output"] and TRICKY_PASSWORD not in r["output"]
+    assert session.run("$KasTecLdap.Server + '|' + $KasTecLdap.Base")["output"] == "dc02.corp.example.com|DC=corp,DC=example,DC=com"
+    assert session.run("$KasTecLdap.Credential.GetNetworkCredential().Password")["output"] == TRICKY_PASSWORD
+    assert session.run("ConvertTo-LdapFilterValue 'a*(b)\\c'")["output"] == r"a\2a\28b\29\5cc"
+
+    session.run(FAKE_LDAP)
+    out = session.run("Find-LdapUser 'jo*' | ForEach-Object { '{0}:{1}:{2}' -f $_.User, $_.Disabled, $_.Locked }")["output"]
+    assert out.splitlines() == ["jdoe:True:True", "ok:False:False"]
+    assert r"(sAMAccountName=*jo\2a*)" in session.run("$LastLdapFilter")["output"]
+    assert session.run("(Get-LdapLockedUser).User")["output"] == "jdoe"
+    assert session.run("(Find-LdapGroup *)[0].Members")["output"] == "2"
+    assert session.run("Find-LdapUser *; $LastLdapFilter")["output"].endswith("(&(objectCategory=person)(objectClass=user))")
+    assert "(memberOf=CN=John Doe" in session.run("Get-LdapGroupMember Admins | Out-Null; $LastLdapFilter")["output"]
