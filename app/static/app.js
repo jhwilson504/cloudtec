@@ -1610,44 +1610,184 @@ async function renderDCs() {
     }
   }
 
-  // Restart one DC, after warnings about what depends on it and typing its name to confirm.
+  // Restart one DC with the guided procedure (checks before, the restart, checks after).
   function restartDC(dc, dcs, conn) {
-    const host = (conn?.config?.host || "").toLowerCase();
-    const warnings = [];
-    if (dc.roles.length) warnings.push(`It holds FSMO roles (<b>${dc.roles.map(esc).join(", ")}</b>). They're unavailable until it's back.`);
-    const sameSite = dcs.filter((d) => d !== dc && d.site === dc.site);
-    if (!sameSite.length) warnings.push(`It's the only domain controller in site <b>${esc(dc.site || "unknown")}</b>, so users there will authenticate across the WAN until it's back.`);
-    else if (dc.global_catalog && !sameSite.some((d) => d.global_catalog)) warnings.push(`It's the only Global Catalog in site <b>${esc(dc.site)}</b>.`);
-    if (host && [dc.name.toLowerCase(), (dc.dns_name || "").toLowerCase()].includes(host))
-      warnings.push(`KasTec's own connection to ${esc(conn.name)} uses this DC, so KasTec's AD pages will fail until it's back.`);
-    modal(`<h2>Restart ${esc(dc.name)}?</h2>
-      <p>This restarts the domain controller <b>${esc(dc.dns_name || dc.name)}</b> straight away, using the account saved for ${esc(conn?.name || "this domain")}.</p>
-      ${warnings.length ? `<div class="notice bad" style="display:grid;gap:6px">${warnings.map((w) => `<div>⚠ ${w}</div>`).join("")}</div>` : ""}
-      <form id="dc-restart-form" style="display:grid;gap:12px;margin-top:14px">
-        <label><span>Type <b class="mono">${esc(dc.name)}</b> to confirm</span> <input name="confirm" autocomplete="off" spellcheck="false" autocapitalize="none" required></label>
-        <p class="error" id="dc-restart-err" style="margin:0"></p>
-        <div class="modal-actions" style="margin-top:0"><button type="button" class="btn" data-close>Cancel</button>
-          <button class="btn danger" type="submit" disabled>Restart ${esc(dc.name)}</button></div></form>`);
-    const form = $("#dc-restart-form"), go = form.querySelector("button[type=submit]");
-    form.confirm.focus();
-    form.confirm.oninput = () => { go.disabled = form.confirm.value.trim().toLowerCase() !== dc.name.toLowerCase(); };
-    form.onsubmit = async (e) => {
-      e.preventDefault();
-      go.disabled = true; go.textContent = "Restarting…";
-      try {
-        const r = await api("POST", `/api/ad/${state.ad}/domain-controllers/restart`, { name: dc.name, confirm: form.confirm.value });
-        closeModal();
-        toast(r.message);
-      } catch (err) {
-        $("#dc-restart-err").textContent = err.message;
-        go.disabled = false; go.textContent = `Restart ${dc.name}`;
-      }
-    };
+    restartWizard(state.ad, dc, conn, load);
   }
 
   $("#dc-conn")?.addEventListener("change", (e) => { state.ad = e.target.value; load(); });
   $("#dc-refresh").onclick = load;
   load();
+}
+
+// ---- guided domain controller restart ------------------------------------------
+// The "Restarting a Domain Controller" procedure, step by step: KasTec runs the checks it can,
+// asks you to confirm the rest, restarts the DC, watches it come back, and records the outcome.
+
+const CHECK_MARK = { ok: ["✓", "ok"], warn: ["!", "warn"], fail: ["✗", "bad"], unknown: ["?", "plain"], wait: ["…", "plain"] };
+
+function checkRows(checks) {
+  return checks.map((c) => {
+    const [mark, cls] = CHECK_MARK[c.status] || CHECK_MARK.unknown;
+    return `<div class="chk"><span class="badge ${cls} chk-mark">${mark}</span><div>
+      <b>${esc(c.label)}</b><div class="muted">${esc(c.detail)}</div>
+      ${c.command ? `<div class="chk-cmd"><pre>${esc(c.command)}</pre><button type="button" class="btn small" data-copy="${esc(c.command)}">Copy</button></div>` : ""}
+    </div></div>`;
+  }).join("");
+}
+
+function bindCopy(root) {
+  root.querySelectorAll("[data-copy]").forEach((b) => b.onclick = async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); toast("Copied"); }
+    catch { toast("Couldn't copy. Select the text instead.", true); }
+  });
+}
+
+async function restartWizard(connId, dc, conn, reload) {
+  const domain = (dc.dns_name || "").split(".").slice(1).join(".") || conn?.name || "";
+  modal(`<h2>Restart ${esc(dc.name)}</h2>
+    <p class="muted" style="margin-top:-6px">${esc(dc.dns_name || dc.name)} · site ${esc(dc.site || "unknown")}</p>
+    <div id="rw"><p class="muted">Running the checks before the restart…</p></div>`, true);
+  let pre;
+  try {
+    pre = await api("POST", `/api/ad/${connId}/domain-controllers/precheck`, { name: dc.name });
+  } catch (err) {
+    $("#rw").innerHTML = `<div class="notice bad">${esc(err.message)}</div>
+      <div class="modal-actions"><button class="btn" data-close>Close</button></div>`;
+    return;
+  }
+  const failed = pre.checks.filter((c) => c.status === "fail");
+  const fsmo = pre.checks.find((c) => c.id === "fsmo");
+  const holdsRoles = fsmo && fsmo.status !== "ok";
+  const confirms = [
+    "It's a quiet time, and the helpdesk knows sign-ins may be slower for about 10 minutes.",
+    "There's a backup of this DC (System State or VM) from the last 24 hours.",
+    "PCs and servers have another DC as their second DNS server.",
+    ...(holdsRoles ? ["This is a short restart (back within about 15 minutes), or I've moved the FSMO roles (see above)."] : []),
+  ];
+
+  $("#rw").innerHTML = `<h3 class="rw-step">1. Before the restart</h3>
+    <div class="chk-list">${checkRows(pre.checks)}</div>
+    <form id="rw-form" style="display:grid;gap:10px;margin-top:12px">
+      <b>Confirm</b>
+      ${confirms.map((text, i) => `<label class="inline"><input type="checkbox" name="c${i}"> ${esc(text)}</label>`).join("")}
+      ${failed.length ? `<div class="notice bad">A check failed. Fix it first if you can. To restart anyway, say why (this is recorded):
+          <textarea name="reason" rows="2" style="width:100%;margin-top:6px" placeholder="e.g. BTCPRODDC2 is down for hardware repair and users can't sign in"></textarea></div>` : ""}
+      <label><span>Type <b class="mono">${esc(dc.name)}</b> to confirm</span>
+        <input name="confirm" autocomplete="off" spellcheck="false" autocapitalize="none"></label>
+      <p class="error" id="rw-err" style="margin:0"></p>
+      <div class="modal-actions" style="margin-top:0"><button type="button" class="btn" data-close>Cancel</button>
+        <button class="btn danger" type="submit" disabled>Restart ${esc(dc.name)}</button></div>
+    </form>`;
+  bindCopy($("#rw"));
+  const form = $("#rw-form"), go = form.querySelector("button[type=submit]");
+  const ready = () => confirms.every((_, i) => form[`c${i}`].checked)
+    && form.confirm.value.trim().toLowerCase() === dc.name.toLowerCase()
+    && (!failed.length || form.reason.value.trim().length >= 5);
+  form.oninput = () => { go.disabled = !ready(); };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    if (!ready()) return;
+    go.disabled = true; go.textContent = "Restarting…";
+    try {
+      await api("POST", `/api/ad/${connId}/domain-controllers/restart`,
+        { name: dc.name, confirm: form.confirm.value, override_reason: failed.length ? form.reason.value : "" });
+    } catch (err) {
+      $("#rw-err").textContent = err.message;
+      go.disabled = false; go.textContent = `Restart ${dc.name}`;
+      return;
+    }
+    watchRestart(connId, dc, conn, domain, fsmo, reload);
+  };
+}
+
+function watchRestart(connId, dc, conn, domain, fsmo, reload) {
+  const started = Date.now();
+  const interval = conn?.demo ? 2000 : 10000;
+  const minutes = () => (Date.now() - started) / 60000;
+  let sawDown = false, stopped = false;
+  $("#rw").innerHTML = `<h3 class="rw-step">2. Restarting</h3>
+    <p><b id="rw-phase">Restart sent. Waiting for ${esc(dc.name)} to shut down…</b> <span class="muted" id="rw-time"></span></p>
+    <div id="rw-late"></div><div class="chk-list" id="rw-checks"></div>
+    <div class="modal-actions"><button type="button" class="btn" id="rw-stop">Stop watching</button></div>`;
+  $("#rw-stop").onclick = () => { stopped = true; finish(null, "not back"); };
+
+  const tick = async () => {
+    if (stopped || $("#modal").classList.contains("hidden")) return;   // window closed: stop polling
+    const m = minutes();
+    $("#rw-time").textContent = `(${Math.floor(m)}:${String(Math.floor((m * 60) % 60)).padStart(2, "0")} elapsed)`;
+    let h;
+    try { h = await api("GET", `/api/ad/${connId}/domain-controllers/${encodeURIComponent(dc.name)}/health`); }
+    catch (err) { h = { ready: false, checks: [{ label: "Checking", status: "unknown", detail: err.message }] }; }
+    const answering = h.checks.find((c) => c.id === "ports")?.status === "ok";
+    if (!answering) sawDown = true;
+    // Until it has gone down (or 2.5 minutes have passed), "ready" is just the DC before it shut down.
+    const back = h.ready && (sawDown || m > 2.5);
+    $("#rw-phase").textContent = back ? "Back. Checking replication…"
+      : !sawDown ? `Restart sent. Waiting for ${dc.name} to shut down…`
+      : !answering ? "Restarting: not answering yet."
+      : "Starting up: waiting for Active Directory to finish starting.";
+    $("#rw-checks").innerHTML = sawDown || back ? checkRows(h.checks) : "";
+    if (m > 15 && !back) {
+      $("#rw-late").innerHTML = `<div class="notice bad" style="margin-bottom:10px">${esc(dc.name)} isn't back after 15 minutes.
+        Open its console in vCenter (or iDRAC) to see where it's stuck: installing updates is the most common reason, so give it time.
+        ${fsmo && fsmo.status !== "ok" ? "If it stays down, move its FSMO roles to another DC (the first command under FSMO roles in step 1)." : ""}
+        The other DCs carry the load meanwhile.</div>`;
+    }
+    if (back) {
+      let full;
+      try { full = await api("GET", `/api/ad/${connId}/domain-controllers/${encodeURIComponent(dc.name)}/health?replication=true`); }
+      catch (err) { full = { ...h, checks: [...h.checks, { label: "Replication is healthy", status: "unknown", detail: err.message }] }; }
+      return finish(full, null, !sawDown);
+    }
+    if (m > 30) return finish(h, "not back");
+    setTimeout(tick, interval);
+  };
+  setTimeout(tick, conn?.demo ? 1000 : 5000);
+
+  function finish(result, outcome, neverWentDown = false) {
+    stopped = true;
+    const host = dc.dns_name || dc.name;
+    const healthy = result && result.checks.every((c) => c.status === "ok");
+    const manual = [
+      { label: "Check the event logs for new errors since it started", status: "unknown", detail: "Run this and look for errors from the last 30 minutes:",
+        command: `Get-WinEvent -ComputerName ${host} -FilterHashtable @{ LogName = 'Directory Service','DNS Server','System'; Level = 1,2; StartTime = (Get-Date).AddMinutes(-30) } |\n  Select-Object TimeCreated, LogName, Id, Message | Format-Table -Wrap` },
+      { label: "Check from a user's point of view", status: "unknown", detail: "Sign in on a test PC, run this, and open a network share and a print queue:",
+        command: `nltest /sc_verify:${domain}` },
+      ...(fsmo && fsmo.status !== "ok" && fsmo.command ? [{ label: "If you moved the FSMO roles, move them back", status: "unknown",
+        detail: "Then confirm with netdom query fsmo:", command: fsmo.command.split("\n").slice(1).join("\n") + "\nnetdom query fsmo" }] : []),
+    ];
+    $("#rw").innerHTML = `<h3 class="rw-step">3. After the restart</h3>
+      ${outcome === "not back" ? `<div class="notice bad">${esc(dc.name)} didn't come back while KasTec was watching.
+          Check its console in vCenter or iDRAC.</div>`
+        : `${neverWentDown ? '<div class="notice" style="margin-bottom:10px">KasTec never saw it go offline: it may have restarted very quickly, or the restart may still be pending (for example, waiting for updates). Check its uptime if in doubt.</div>' : ""}
+           <div class="notice ${healthy ? "ok" : "bad"}" style="margin-bottom:10px">${healthy
+             ? `${esc(dc.name)} is back and healthy.` : `${esc(dc.name)} is back, but some checks need a look.`}</div>
+           <div class="chk-list">${checkRows(result.checks)}</div>`}
+      <h3 class="rw-step" style="margin-top:16px">Still to do by hand</h3>
+      <div class="chk-list">${checkRows(manual)}</div>
+      <form id="rw-done" style="display:grid;gap:10px;margin-top:12px">
+        <label>How did it go?
+          <select name="outcome">
+            <option value="healthy" ${healthy ? "selected" : ""}>Back and healthy</option>
+            <option value="issues" ${!healthy && outcome !== "not back" ? "selected" : ""}>Back, with issues</option>
+            <option value="not back" ${outcome === "not back" ? "selected" : ""}>Not back</option>
+          </select></label>
+        <label>Notes (optional) <textarea name="notes" rows="2" placeholder="e.g. change ref, what you checked"></textarea></label>
+        <div class="modal-actions" style="margin-top:0"><button type="button" class="btn" data-close>Close without recording</button>
+          <button class="btn primary" type="submit">Record and close</button></div>
+      </form>`;
+    bindCopy($("#rw"));
+    $("#rw-done").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      try {
+        await api("POST", `/api/ad/${connId}/domain-controllers/restart-complete`, { name: dc.name, outcome: f.outcome.value, notes: f.notes.value });
+        closeModal(); toast(`Recorded: ${dc.name} ${f.outcome.options[f.outcome.selectedIndex].text.toLowerCase()}`);
+        reload?.();
+      } catch (err) { toast(err.message, true); }
+    };
+  }
 }
 
 // ---- Reset password --------------------------------------------------------

@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import certgen, certwatch
+from . import certgen, certwatch, dcrestart
 from . import shell as powershell
 from .auth import COOKIE, AdminPassword, LoginThrottle, PasswordError, Sessions, hash_password, verify_hash
 from .config import Settings
@@ -113,6 +113,17 @@ class PasswordBody(DnBody):
 class RestartDCBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     confirm: str
+    # Required to restart when a pre-check fails (e.g. no other DC in the site is answering); recorded.
+    override_reason: str = Field(default="", max_length=500)
+
+
+class DCNameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class RestartCompleteBody(DCNameBody):
+    outcome: Literal["healthy", "issues", "not back"]
+    notes: str = Field(default="", max_length=1000)
 
 
 class PowerBody(BaseModel):
@@ -654,26 +665,93 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()},
                 "configured_dc": conn.config.get("host"), "connected_via": via}
 
+    def find_dc(conn: Connection, name: str) -> tuple[dict, list[dict]]:
+        name = name.strip()
+        with open_connector(conn) as c:
+            dcs = c.domain_controllers()
+        learn_dcs(conn, [d.get("dns_name") for d in dcs])
+        dc = next((d for d in dcs if d["name"].lower() == name.lower()), None)
+        if not dc:
+            raise HTTPException(404, f"{name} isn't a domain controller in {conn.name}.")
+        return dc, dcs
+
+    def replication_for(conn: Connection, dc: dict, dcs: list[dict]):
+        """The DC's replication partners, or why they couldn't be read (None: no PowerShell here)."""
+        if conn.demo:
+            return dcrestart.demo_partners(dc, dcs)
+        if not exe:
+            return None
+        return powershell.replication_status(exe, conn, dcrestart.host_of(dc))[1]
+
+    @app.post("/api/ad/{conn_id}/domain-controllers/precheck", dependencies=admin_only)
+    def ad_restart_precheck(conn_id: str, body: DCNameBody):
+        """The automatic "before you restart" checks for one DC."""
+        conn = get_conn(conn_id, "ad")
+        dc, dcs = find_dc(conn, body.name)
+        return {"dc": dc, "checks": [
+            dcrestart.partner_check(dc, dcs, port_open, conn.demo),
+            dcrestart.replication_check(replication_for(conn, dc, dcs), dc["name"]),
+            dcrestart.fsmo_check(dc, dcs),
+            dcrestart.kastec_dc_check(dc, conn.config.get("host", "")),
+        ]}
+
+    @app.get("/api/ad/{conn_id}/domain-controllers/{name}/health", dependencies=admin_only)
+    def ad_dc_health(conn_id: str, name: str, replication: bool = False):
+        """Is this DC back after a restart? Polled by the restart window, so it only talks to that DC."""
+        conn = get_conn(conn_id, "ad")
+        if conn.demo:
+            ports, dse, error = dcrestart.demo_state(conn_id, name)
+            host = name
+        else:
+            # Only DCs KasTec has seen in this domain: the saved password is never sent anywhere else.
+            known = [conn.config.get("host", "")] + list(conn.config.get("known_dcs") or [])
+            host = next((h for h in known if h and h.split(".")[0].lower() == name.split(".")[0].lower()), None)
+            if not host:
+                raise HTTPException(404, f"{name} isn't a domain controller KasTec knows in {conn.name}.")
+            ports = {str(p): port_open(host, p) for p in dcrestart.PARTNER_PORTS}
+            dse, error = dcrestart.read_dse(conn, host) if all(ports.values()) else (None, "Not answering on its ports yet.")
+        checks = dcrestart.back_checks(ports, dse, error)
+        if replication and dse:
+            if conn.demo:
+                dc, dcs = find_dc(conn, name)
+                partners = dcrestart.demo_partners(dc, dcs)
+            else:
+                partners = powershell.replication_status(exe, conn, host)[1] if exe else None
+            checks.append(dcrestart.replication_check(partners, name))
+        return {"host": host, "ready": all(c["status"] in ("ok", "warn") for c in checks), "checks": checks}
+
     @app.post("/api/ad/{conn_id}/domain-controllers/restart", dependencies=admin_only)
     def ad_restart_domain_controller(conn_id: str, body: RestartDCBody, request: Request):
         conn = get_conn(conn_id, "ad")
         name = body.name.strip()
         if body.confirm.strip().lower() != name.lower():
             raise HTTPException(422, "Type the domain controller's name exactly to confirm the restart.")
-        with open_connector(conn) as c:
-            dc = next((d for d in c.domain_controllers() if d["name"].lower() == name.lower()), None)
-        if not dc:
-            raise HTTPException(404, f"{name} isn't a domain controller in {conn.name}.")
+        dc, dcs = find_dc(conn, name)
+        # Never leave a site without a working DC unless someone says why.
+        partner = dcrestart.partner_check(dc, dcs, port_open, conn.demo)
+        reason = body.override_reason.strip()
+        if partner["status"] == "fail" and not reason:
+            raise HTTPException(409, partner["detail"] + " Give a reason to restart anyway.")
+        note = f" (pre-check overridden: {reason})" if partner["status"] == "fail" else ""
         if conn.demo:
-            audit(request, "restarted domain controller (demo)", dc["name"], conn)
-            return {"ok": True, "message": f"{dc['name']} is a demo DC, so nothing was restarted."}
+            dcrestart.demo_restart(conn_id, dc["name"])
+            audit(request, f"restarted domain controller (demo){note}", dc["name"], conn)
+            return {"ok": True, "message": f"{dc['name']} is a demo DC: KasTec simulates the restart."}
         if not exe:
             raise HTTPException(409, "PowerShell wasn't found on the computer KasTec runs on, so it can't restart DCs.")
-        ok, output = powershell.restart_domain_controller(exe, conn, dc["dns_name"] or dc["name"])
-        audit(request, "restarted domain controller" if ok else "domain controller restart failed", dc["name"], conn)
+        ok, output = powershell.restart_domain_controller(exe, conn, dcrestart.host_of(dc))
+        audit(request, ("restarted domain controller" if ok else "domain controller restart failed") + note, dc["name"], conn)
         if not ok:
             raise HTTPException(502, f"{dc['name']} wasn't restarted: {output}")
         return {"ok": True, "message": f"Restart sent to {dc['name']}. A domain controller is usually back within 5-10 minutes."}
+
+    @app.post("/api/ad/{conn_id}/domain-controllers/restart-complete", dependencies=admin_only)
+    def ad_restart_complete(conn_id: str, body: RestartCompleteBody, request: Request):
+        """Record how the restart went, from the after-restart checks in the restart window."""
+        conn = get_conn(conn_id, "ad")
+        notes = f": {body.notes.strip()}" if body.notes.strip() else ""
+        audit(request, f"DC restart checked: {body.outcome}{notes}", body.name.strip(), conn)
+        return {"ok": True}
 
     @app.get("/api/ad/{conn_id}/users", dependencies=api)
     def ad_users(conn_id: str, q: str = ""):

@@ -168,8 +168,9 @@ def _contains(attrs: list[str], q: str) -> str:
 
 
 class ADConnector:
-    def __init__(self, config: dict, secret: str):
+    def __init__(self, config: dict, secret: str, failover: bool = True):
         self.host = config.get("host", "").strip()
+        self.failover = failover  # False: talk to exactly this DC (e.g. to check it after a restart)
         self.use_ssl = config.get("use_ssl", True)
         self.port = int(config.get("port") or (636 if self.use_ssl else 389))
         self.verify_ssl = config.get("verify_ssl", True)
@@ -202,8 +203,10 @@ class ADConnector:
         tls = Tls(validate=ssl.CERT_REQUIRED if self.verify_ssl else ssl.CERT_NONE)
         unreachable: list[str] = []
         tried: set[str] = set()
-        if self._try(self.candidates(), tls, unreachable, tried):
+        if self._try(self.candidates() if self.failover else [self.host], tls, unreachable, tried):
             return self
+        if not self.failover:
+            raise ConnectorError(f"{self.host} isn't answering on port {self.port}: " + "; ".join(unreachable))
         # None of the DCs KasTec knows answered: look the domain's DCs up in DNS and try the others.
         found = [h for h in discover_dcs(self.domain_name) if h.lower() not in tried]
         if found and self._try(found, tls, unreachable, tried):
@@ -376,6 +379,19 @@ class ADConnector:
             return {}
         entries = [r for r in self._conn.response if r.get("type") == "searchResEntry"]
         return entries[0]["attributes"] if entries else {}
+
+    def root_dse(self) -> dict:
+        """This DC's own state: has AD finished its start-up sync, is its Global Catalog ready, and its clock."""
+        attrs = self._read("", ["isSynchronized", "isGlobalCatalogReady", "currentTime", "dnsHostName"])
+        flag = lambda v: str(_first(attrs, v)).upper() == "TRUE"  # noqa: E731
+        current = _first(attrs, "currentTime")
+        if current is not None and not isinstance(current, datetime):
+            try:
+                current = datetime.strptime(str(current)[:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+            except ValueError:
+                current = None
+        return {"is_synchronized": flag("isSynchronized"), "gc_ready": flag("isGlobalCatalogReady"),
+                "current_time": current.isoformat() if current else None, "dns_name": _first(attrs, "dnsHostName")}
 
     def dc_hostnames(self) -> list[str]:
         """DNS names of the domain's DCs (a cheap query, used to learn where to fail over to)."""

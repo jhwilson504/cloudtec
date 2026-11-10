@@ -259,3 +259,14 @@ nav a { display: flex; align-items: center; }
   .form { grid-template-columns: 1fr; }
 }
 .cert-req-actions .btn { margin: 2px 2px 2px 0; text-decoration: none; display: inline-block; }
+
+/* guided DC restart */
+.rw-step { font-size: 15px; margin: 4px 0 8px; }
+.chk-list { display: grid; gap: 8px; }
+.chk { display: grid; grid-template-columns: 28px 1fr; gap: 8px; align-items: start; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--panel); }
+.chk .muted { font-size: 13px; }
+.chk-mark { width: 24px; text-align: center; padding: 2px 0; }
+.chk-cmd { display: flex; gap: 8px; align-items: flex-start; margin-top: 6px; }
+.chk-cmd pre { flex: 1; margin: 0; padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--border);
+  border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 Consolas, ui-monospace, Menlo, monospace; }

@@ -230,3 +230,32 @@ def restart_computer_script(conn, computer: str) -> str:
 
 def restart_domain_controller(exe: str, conn, computer: str) -> tuple[bool, str]:
     return run_script(exe, restart_computer_script(conn, computer), timeout=120)
+
+
+def replication_script(conn, computer: str) -> str:
+    """One line per replication partner of `computer`: partner|last success (ISO)|last result|consecutive failures."""
+    user = conn.config.get("bind_user")
+    return (f"$__cred = New-Object System.Management.Automation.PSCredential({ps_quote(user)}, "
+            f"(ConvertTo-SecureString {ps_quote(conn.secret)} -AsPlainText -Force))\n"
+            "Import-Module ActiveDirectory -ErrorAction Stop -WarningAction SilentlyContinue\n"
+            f"Get-ADReplicationPartnerMetadata -Target {ps_quote(computer)} -Scope Server -Credential $__cred -ErrorAction Stop | "
+            "ForEach-Object { 'PARTNER|{0}|{1}|{2}|{3}' -f $_.Partner, "
+            "$(if ($_.LastReplicationSuccess) { $_.LastReplicationSuccess.ToUniversalTime().ToString('o') }), "
+            "$_.LastReplicationResult, $_.ConsecutiveReplicationFailures }")
+
+
+def replication_status(exe: str, conn, computer: str) -> tuple[bool, list[dict] | str]:
+    """(True, partners) or (False, why it couldn't be checked)."""
+    ok, out = run_script(exe, replication_script(conn, computer), timeout=90)
+    if not ok:
+        return False, out
+    partners = []
+    for line in out.splitlines():
+        if not line.startswith("PARTNER|"):
+            continue
+        _, dn, last, result, failures = (line.split("|") + [""] * 5)[:5]
+        # CN=NTDS Settings,CN=BTCPRODDC2,CN=Servers,CN=poinciana,... -> BTCPRODDC2
+        parts = [p.split("=", 1)[-1] for p in dn.split(",")]
+        partners.append({"partner": parts[1] if len(parts) > 1 else dn, "last_success": last or None,
+                         "last_result": int(result or 0), "failures": int(failures or 0)})
+    return True, partners
