@@ -1879,7 +1879,9 @@ async function renderReset() {
 const shellLog = [];      // transcript, kept while you move between pages
 const shellHistory = [];  // commands, for the up/down arrow keys
 
-async function renderShell() {
+async function renderShell(arg) {
+  const popout = arg === "popout";
+  if (popout) document.title = "PowerShell · KasTec";
   loading();
   const [s, conns] = await Promise.all([api("GET", "/api/shell"), api("GET", "/api/connections")]);
   const real = conns.filter((c) => !c.demo && (c.kind === "ad" || c.kind === "vsphere"));
@@ -1892,18 +1894,22 @@ async function renderShell() {
   const head = `<div class="page-head"><div class="row" style="gap:12px">
       <img src="/static/powershell.svg" alt="" width="40" height="40">
       <div><h1>PowerShell</h1><p class="muted" style="margin:0">Commands run on the computer KasTec is running on, as the user who started it.</p></div>
-    </div>${s.available ? '<div class="row"><button class="btn" id="sh-clear">Clear screen</button><button class="btn" id="sh-reset">Restart session</button></div>' : ""}</div>`;
+    </div>${s.available ? `<div class="row"><button class="btn" id="sh-clear">Clear screen</button><button class="btn" id="sh-reset">Restart session</button>
+      ${popout ? "" : '<button class="btn" id="sh-pop" title="Open the terminal in its own window">Pop out ⧉</button>'}
+      <button class="btn" id="sh-full" title="Fill the screen (Esc to return)">Full screen ⛶</button></div>` : ""}</div>`;
   if (!s.available) {
     view.innerHTML = `${head}<div class="notice">${esc(s.reason)}</div>`;
     return;
   }
   let cwd = s.cwd;
-  view.innerHTML = `${head}${connectBar}
+  view.innerHTML = `${head}<div class="term-wrap" id="term-wrap">${connectBar}
+    <div class="term-fs-bar"><b>PowerShell</b><span class="muted">Esc to leave full screen</span>
+      <button class="btn small" id="sh-full-exit">Exit full screen</button></div>
     <div class="term" id="term">
       <pre id="term-out"></pre>
       <div class="term-input"><span id="term-prompt"></span><textarea id="term-in" rows="1" spellcheck="false" autocomplete="off"
         aria-label="PowerShell command"></textarea></div>
-    </div>
+    </div></div>
     <p class="muted small-note">Enter runs the command · Shift+Enter adds a new line · ↑ ↓ recall earlier commands.
       Commands that ask questions can't be answered here, so add <code>-Force</code> or <code>-Confirm:$false</code>.
       Commands stop after 5 minutes.</p>`;
@@ -1972,6 +1978,30 @@ async function renderShell() {
   });
   term.addEventListener("click", () => { if (!window.getSelection().toString()) input.focus(); });
   $("#sh-clear").onclick = () => { shellLog.length = 0; draw(); input.focus(); };
+
+  // Full screen: the terminal and its Connect bar fill the screen; Esc (or the button) returns.
+  const wrap = $("#term-wrap");
+  const toggleFull = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await wrap.requestFullscreen();
+    } catch { toast("This browser wouldn't switch to full screen.", true); }
+    input.focus();
+  };
+  $("#sh-full").onclick = toggleFull;
+  $("#sh-full-exit").onclick = toggleFull;
+  document.onfullscreenchange = () => {
+    const btn = $("#sh-full");
+    if (btn) btn.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen ⛶";
+    term.scrollTop = term.scrollHeight;
+  };
+
+  // Pop out: the same session in its own window (move it to another monitor, maximise it...).
+  $("#sh-pop")?.addEventListener("click", () => {
+    const w = window.open(`${location.pathname}#/powershell/popout`, "kastec-powershell", "popup=yes,width=1100,height=720");
+    if (!w) toast("Your browser blocked the new window. Allow pop-ups for KasTec and try again.", true);
+    else w.focus();
+  });
   $("#sh-reset").onclick = async () => {
     if (!(await confirmAction("Restart session", "Start a fresh PowerShell session? Variables and loaded modules from this session are cleared.", "Restart"))) return;
     cwd = (await api("POST", "/api/shell/reset")).cwd;
@@ -2181,6 +2211,7 @@ const ADMIN_ROUTES = new Set(["connections", "users", "powershell"]);
 
 async function route() {
   const [, name = "dashboard", arg] = location.hash.split("/");
+  document.body.classList.toggle("popout", name === "powershell" && arg === "popout");
   if (ADMIN_ROUTES.has(name) && !isAdmin()) {
     location.hash = "#/dashboard";  // e.g. an operator signing in where an admin left off
     return;

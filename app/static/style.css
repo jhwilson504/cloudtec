@@ -270,3 +270,16 @@ nav a { display: flex; align-items: center; }
 .chk-cmd { display: flex; gap: 8px; align-items: flex-start; margin-top: 6px; }
 .chk-cmd pre { flex: 1; margin: 0; padding: 6px 8px; background: var(--panel-2); border: 1px solid var(--border);
   border-radius: 6px; white-space: pre-wrap; word-break: break-word; font: 12px/1.4 Consolas, ui-monospace, Menlo, monospace; }
+
+/* PowerShell: full screen and pop-out window */
+.term-fs-bar { display: none; }
+.term-wrap:fullscreen { background: var(--bg); padding: 14px 18px; display: flex; flex-direction: column; gap: 10px; }
+.term-wrap:fullscreen .term-fs-bar { display: flex; gap: 12px; align-items: center; }
+.term-wrap:fullscreen .term-fs-bar .btn { margin-left: auto; }
+.term-wrap:fullscreen .toolbar { margin-bottom: 0; }
+.term-wrap:fullscreen .term { flex: 1; height: auto; min-height: 0; font-size: 14px; }
+body.popout .sidebar, body.popout .topbar { display: none; }
+body.popout #view { padding: 12px 16px; max-width: none; }
+body.popout .page-head { margin-bottom: 10px; }
+body.popout .page-head p.muted, body.popout .small-note { display: none; }
+body.popout .term { height: calc(100vh - 150px); }
