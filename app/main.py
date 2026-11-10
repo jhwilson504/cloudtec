@@ -74,6 +74,7 @@ class ShellBody(BaseModel):
 
 class ShellConnectBody(BaseModel):
     connection_id: str
+    dc: str = ""   # Active Directory only: which of the domain's DCs to use (default: the configured one)
 
 
 class ConnectionBody(BaseModel):
@@ -638,8 +639,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(422, f"{conn.name} is a demo connection, so there's no real server to connect to.")
         if conn.kind not in ("ad", "vsphere"):
             raise HTTPException(422, "PowerShell can only sign in to Active Directory and vCenter connections.")
-        audit(request, "PowerShell: signed session in", conn.name, conn)
-        return session.run(connect_script(conn), timeout=120, log_as=f"[connect] {conn.name} ({conn.kind})")
+        host = None
+        if body.dc and conn.kind == "ad":
+            known = [conn.config.get("host", "")] + list(conn.config.get("known_dcs") or [])
+            want = body.dc.strip().split(".")[0].lower()
+            host = next((h for h in known if h and h.split(".")[0].lower() == want), None)
+            if not host:
+                raise HTTPException(422, f"{body.dc} isn't one of {conn.name}'s known domain controllers.")
+        target = f"{conn.name} via {host}" if host else conn.name
+        audit(request, "PowerShell: signed session in", target, conn)
+        return session.run(connect_script(conn, host), timeout=120, log_as=f"[connect] {target} ({conn.kind})")
 
     @app.post("/api/shell/reset", dependencies=admin_only)
     def shell_reset(request: Request):

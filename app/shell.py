@@ -149,15 +149,16 @@ Install it once (no Administrator needed):
 The saved credential is already available as $KasTec[{name}].Credential."""
 
 
-def connect_script(conn) -> str:
+def connect_script(conn, host: str | None = None) -> str:
     """PowerShell that signs this session in to a saved connection.
 
     The password only travels inside the base64-encoded command over the
     session's stdin, never on a command line, in the history log or in output.
     Every value from the connection is passed as a single-quoted literal.
+    For Active Directory, `host` picks which domain controller the AD cmdlets talk to.
     """
     cfg = conn.config
-    host = cfg["host"]
+    host = host or cfg["host"]
     name = ps_quote(conn.name)
     user = cfg.get("bind_user") if conn.kind == "ad" else cfg.get("username")
     if conn.kind == "ad":

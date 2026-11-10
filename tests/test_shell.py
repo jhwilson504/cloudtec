@@ -1,5 +1,8 @@
 """The PowerShell page. Session tests need PowerShell (pwsh or powershell) on PATH."""
 
+import json
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -176,3 +179,30 @@ def test_connect_through_api(tmp_path):
 def test_connect_refused_from_remote_browser(tmp_path):
     with make_client(tmp_path, "local") as c:
         assert c.post("/api/shell/connect", json={"connection_id": "x"}).status_code == 403
+
+
+@needs_pwsh
+def test_connect_ad_to_a_chosen_dc(session, tmp_path):
+    mods = tmp_path / "modules"
+    fake_module(mods, "ActiveDirectory", FAKE_AD)
+    session.run(f"$env:PSModulePath = '{mods}' + [IO.Path]::PathSeparator + $env:PSModulePath")
+    r = session.run(connect_script(conn("ad"), "dc02.corp.example.com"))
+    assert "Connected to Corp $prod (dc02.corp.example.com)" in r["output"]
+    assert session.run("Get-ADUser jdoe")["output"].startswith("server=dc02.corp.example.com ")
+
+
+@needs_pwsh
+def test_connect_api_picks_only_known_dcs(tmp_path):
+    with make_client(tmp_path, "on") as c:
+        ad = c.post("/api/connections", json={"kind": "ad", "name": "Corp", "password": "pw",
+                                              "config": {"host": "dc01.corp.example.com", "bind_user": "svc",
+                                                         "base_dn": "DC=corp,DC=example,DC=com"}}).json()
+        db = sqlite3.connect(tmp_path / "cloudtec.db")   # as if KasTec had learned the domain's DCs
+        cfg = {**ad["config"], "known_dcs": ["DC01.corp.example.com", "DC02.corp.example.com"]}
+        db.execute("UPDATE connections SET config = ? WHERE id = ?", (json.dumps(cfg), ad["id"]))
+        db.commit()
+        db.close()
+        r = c.post("/api/shell/connect", json={"connection_id": ad["id"], "dc": "dc02"})
+        assert r.status_code == 200, r.text
+        assert c.post("/api/shell/connect", json={"connection_id": ad["id"], "dc": "evil.example.com"}).status_code == 422
+        assert "Corp via DC02.corp.example.com" in (tmp_path / "audit.log").read_text()

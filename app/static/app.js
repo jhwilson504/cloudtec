@@ -1885,9 +1885,17 @@ async function renderShell(arg) {
   loading();
   const [s, conns] = await Promise.all([api("GET", "/api/shell"), api("GET", "/api/connections")]);
   const real = conns.filter((c) => !c.demo && (c.kind === "ad" || c.kind === "vsphere"));
+  // One choice per connection, and for Active Directory one per domain controller it knows about.
+  const short = (h) => String(h).split(".")[0].toLowerCase();
+  const targets = real.flatMap((c) => {
+    if (c.kind !== "ad") return [{ c, dc: "", label: `${c.name} (${KIND_LABELS[c.kind]})` }];
+    const host = c.config.host || "";
+    const others = (c.config.known_dcs || []).filter((h) => h && short(h) !== short(host));
+    return [host, ...others].map((h) => ({ c, dc: h, label: `${c.name} via ${h} (${KIND_LABELS[c.kind]})` }));
+  });
   const connectBar = real.length
     ? `<div class="toolbar"><span class="muted">Sign this session in to</span>
-        <select id="sh-conn">${real.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} (${KIND_LABELS[c.kind]})</option>`).join("")}</select>
+        <select id="sh-conn">${targets.map((t, i) => `<option value="${i}">${esc(t.label)}</option>`).join("")}</select>
         <button class="btn primary" id="sh-connect">Connect</button>
         <span class="muted small-note" style="margin:0">Uses the account and password saved in Connections.</span></div>`
     : `<p class="muted">Add an Active Directory or vCenter on the <a href="#/connections">Connections</a> page to sign this session in to it with one click.</p>`;
@@ -1973,8 +1981,9 @@ async function renderShell(arg) {
   }
 
   $("#sh-connect")?.addEventListener("click", () => {
-    const c = real.find((x) => x.id === $("#sh-conn").value);
-    send(`# Connect to ${c.name} with the credentials saved in KasTec`, "/api/shell/connect", { connection_id: c.id });
+    const { c, dc } = targets[Number($("#sh-conn").value)];
+    send(`# Connect to ${c.name}${dc ? ` via ${dc}` : ""} with the credentials saved in KasTec`, "/api/shell/connect",
+      { connection_id: c.id, dc });
   });
   term.addEventListener("click", () => { if (!window.getSelection().toString()) input.focus(); });
   $("#sh-clear").onclick = () => { shellLog.length = 0; draw(); input.focus(); };
