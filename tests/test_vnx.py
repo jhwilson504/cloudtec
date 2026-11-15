@@ -190,3 +190,13 @@ def test_the_learned_ssh_key_is_saved_with_the_connection(tmp_path, monkeypatch)
         assert c.post(f"/api/connections/{v['id']}/test").status_code == 200
         saved = next(x for x in c.get("/api/connections").json() if x["id"] == v["id"])
         assert saved["config"]["host_key"] == KEY
+
+
+def test_rename_a_connection(tmp_path):
+    with client(tmp_path) as c:
+        v = c.post("/api/connections", json={"kind": "vnx", "name": "EMC VNC", "demo": True}).json()
+        r = c.patch(f"/api/connections/{v['id']}", json={"name": " EMC VNX "})
+        assert r.status_code == 200 and r.json()["name"] == "EMC VNX"
+        assert [x["name"] for x in c.get("/api/connections").json()] == ["EMC VNX"]
+        assert c.patch("/api/connections/nope", json={"name": "x"}).status_code == 404
+        assert "renamed connection" in (tmp_path / "audit.log").read_text()

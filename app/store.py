@@ -156,6 +156,12 @@ class Store:
             self._db.commit()
         return conn
 
+    def rename(self, conn_id: str, name: str) -> bool:
+        with self._lock:
+            cur = self._db.execute("UPDATE connections SET name = ? WHERE id = ?", (name, conn_id))
+            self._db.commit()
+            return cur.rowcount > 0
+
     def update_config(self, conn_id: str, config: dict) -> None:
         with self._lock:
             self._db.execute("UPDATE connections SET config = ? WHERE id = ?", (json.dumps(config), conn_id))

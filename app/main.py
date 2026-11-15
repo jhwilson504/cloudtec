@@ -75,6 +75,10 @@ class ShellBody(BaseModel):
     command: str = Field(min_length=1, max_length=100_000)
 
 
+class RenameBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
 class ShellConnectBody(BaseModel):
     connection_id: str
     dc: str = ""   # Active Directory only: which of the domain's DCs to use (default: the configured one)
@@ -472,6 +476,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             result = c.test()
             remember(conn, c)
             return result
+
+    @app.patch("/api/connections/{conn_id}", dependencies=admin_only)
+    def rename_connection(conn_id: str, body: RenameBody, request: Request):
+        conn = store.get(conn_id)
+        name = body.name.strip()
+        if not conn or not name:
+            raise HTTPException(404 if not conn else 422, "Connection not found" if not conn else "Enter a name")
+        store.rename(conn_id, name)
+        audit(request, "renamed connection", f"{conn.name} -> {name}", conn)
+        return store.get(conn_id).public()
 
     @app.delete("/api/connections/{conn_id}", dependencies=admin_only)
     def delete_connection(conn_id: str, request: Request):

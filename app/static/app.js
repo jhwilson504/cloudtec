@@ -1283,14 +1283,11 @@ async function openCreateLun(conn, onDone) {
 
 // An administrator's own commands on the Control Station, like typing them in PuTTY.
 function vnxCommandBox(getConn) {
-  const quick = ["naviseccli -h spa getagent", "naviseccli -h spa faults -list", "naviseccli -h spa storagepool -list",
-    "nas_server -list", "nas_pool -size -all", "/nas/sbin/getreason"];
   return {
     html: `<div class="section" id="vnx-cmd"><h2>Control Station commands</h2>
       <p class="muted" style="margin-top:0">Run your own commands on the Control Station, as you would in PuTTY. Each one signs in fresh
         (no <code>cd</code> or variables kept between commands), commands that ask questions can't be answered here, and every command
         is recorded in the activity log. Unlike the rest of this page, these <b>can</b> change the array.</p>
-      <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">${quick.map((q) => `<button class="btn small" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>
       <div class="term"><pre id="vnx-term"></pre>
         <div class="term-input"><span>$ </span><textarea id="vnx-in" rows="1" spellcheck="false" autocomplete="off" aria-label="Control Station command"></textarea></div></div>
       <p class="muted small-note">Enter runs · Shift+Enter adds a line · ↑ ↓ earlier commands</p></div>`,
@@ -1316,7 +1313,6 @@ function vnxCommandBox(getConn) {
         else if (e.key === "ArrowUp" && single && h > 0) { e.preventDefault(); input.value = hist[--h]; }
         else if (e.key === "ArrowDown" && single && h < hist.length) { e.preventDefault(); h++; input.value = hist[h] ?? ""; }
       });
-      $("#vnx-cmd").querySelectorAll("[data-q]").forEach((b) => b.onclick = () => run(b.dataset.q));
     },
   };
 }
@@ -1764,6 +1760,7 @@ async function renderConnections() {
     <td class="mono">${esc(c.config.host || c.config.hosts?.join(", ") || "–")}</td>
     <td class="mono">${esc(c.config.bind_user || c.config.username || "–")}</td>
     <td class="actions"><button class="btn small" data-test="${i}">Test</button>
+      <button class="btn small" data-rename="${i}">Rename</button>
       <button class="btn small danger" data-del="${i}">Remove</button></td></tr>`);
 
   view.innerHTML = `<div class="page-head"><div><h1>Connections</h1>
@@ -1783,6 +1780,22 @@ async function renderConnections() {
     try { toast((await api("POST", `/api/connections/${c.id}/test`)).message); }
     catch (err) { toast(err.message, true); }
     b.disabled = false;
+  });
+  view.querySelectorAll("[data-rename]").forEach((b) => b.onclick = () => {
+    const c = conns[b.dataset.rename];
+    modal(`<h2>Rename connection</h2><form id="rn-form" class="form" autocomplete="off">
+      <label class="full">Display name <input name="name" required maxlength="80" value="${esc(c.name)}"></label>
+      <div class="full" id="rn-msg"></div>
+      <div class="full modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary">Save</button></div></form>`);
+    const f = $("#rn-form");
+    f.name.select();
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      try {
+        await api("PATCH", `/api/connections/${c.id}`, { name: f.name.value.trim() });
+        closeModal(); toast(`Renamed to ${f.name.value.trim()}`); renderConnections();
+      } catch (err) { $("#rn-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+    };
   });
   view.querySelectorAll("[data-del]").forEach((b) => b.onclick = async () => {
     const c = conns[b.dataset.del];
