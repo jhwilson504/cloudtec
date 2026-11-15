@@ -6,6 +6,10 @@
   <title>KasTec Center</title>
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <link rel="stylesheet" href="/static/style.css">
+  <script>
+    // Apply the saved theme before the page draws, so it doesn't flash the other one.
+    try { var t = localStorage.getItem("kastec-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
 </head>
 <body>
   <div id="login" class="login hidden">
@@ -43,6 +47,11 @@
       </nav>
       <div class="whoami"><div class="muted small-note" style="margin:0">Signed in as</div><b id="whoami-name"></b>
         <div class="muted small-note" style="margin:0" id="whoami-role"></div></div>
+      <div class="theme-switch" role="group" aria-label="Theme">
+        <button type="button" data-theme-choice="auto" title="Follow the Windows setting">Auto</button>
+        <button type="button" data-theme-choice="light" title="Light theme">☀ Light</button>
+        <button type="button" data-theme-choice="dark" title="Dark theme">☾ Dark</button>
+      </div>
       <button id="logout" class="btn ghost small">Sign out</button>
     </aside>
     <main>

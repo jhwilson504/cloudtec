@@ -218,6 +218,16 @@ $("#login-form").addEventListener("submit", async (e) => {
   }
 });
 
+// Theme: Auto (follow Windows), Light or Dark, remembered in this browser.
+function setTheme(choice, save = true) {
+  if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
+  else { choice = "auto"; delete document.documentElement.dataset.theme; }
+  document.querySelectorAll("[data-theme-choice]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeChoice === choice)));
+  if (save) try { localStorage.setItem("kastec-theme", choice); } catch (e) { /* private window: just not remembered */ }
+}
+setTheme(document.documentElement.dataset.theme || "auto", false);
+document.querySelectorAll("[data-theme-choice]").forEach((b) => b.addEventListener("click", () => setTheme(b.dataset.themeChoice)));
+
 $("#logout").addEventListener("click", async () => {
   await api("POST", "/api/logout").catch(() => {});
   showLogin();
