@@ -309,13 +309,16 @@ class VNXConnector:
                 args += ["-hostkey", host_key]
             args += [self.host, "bash -s"]
             try:
-                p = subprocess.run(args, input=script, capture_output=True, text=True, timeout=300,
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                # Bytes, not text: in text mode Windows would turn every \n into \r\n, and the Control
+                # Station's bash would then see "exit 0\r" ("numeric argument required") and "/nas\r".
+                p = subprocess.run(args, input=script.replace("\r", "").encode("utf-8"), capture_output=True,
+                                   timeout=300, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             except subprocess.TimeoutExpired as e:
                 raise ConnectorError(f"The Control Station {self.host} didn't finish answering within 5 minutes") from e
             except OSError as e:
                 raise ConnectorError(f"Couldn't run plink ({plink}): {e}") from e
-            return p.returncode, p.stdout, p.stderr
+            return (p.returncode, p.stdout.decode("utf-8", "replace").replace("\r\n", "\n"),
+                    p.stderr.decode("utf-8", "replace").replace("\r\n", "\n"))
         finally:
             try:
                 os.remove(pwfile)

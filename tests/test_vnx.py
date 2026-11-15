@@ -127,10 +127,11 @@ def test_plink_gets_the_password_in_a_file_that_is_then_deleted(tmp_path, monkey
     monkeypatch.setattr(vnx_mod, "find_plink", lambda: "plink.exe")
     seen = {}
 
-    def fake_run(args, input, capture_output, text, timeout, creationflags):
+    def fake_run(args, input, capture_output, timeout, creationflags):
         pwfile = args[args.index("-pwfile") + 1]
         seen.update(args=args, script=input, password=Path(pwfile).read_text(), pwfile=pwfile)
-        return subprocess.CompletedProcess(args, 0, _vnx_output(), "")
+        # Windows-style line endings coming back are fine too.
+        return subprocess.CompletedProcess(args, 0, _vnx_output().replace("\n", "\r\n").encode(), b"")
 
     monkeypatch.setattr(vnx_mod.subprocess, "run", fake_run)
     VNXConnector({**CONFIG, "port": 2222, "host_key": KEY}, "s3cret pw!", runner=None).test()
@@ -138,7 +139,9 @@ def test_plink_gets_the_password_in_a_file_that_is_then_deleted(tmp_path, monkey
     assert args[:6] == ["plink.exe", "-ssh", "-batch", "-P", "2222", "-l"] and "nasadmin" in args
     assert args[args.index("-hostkey") + 1] == KEY and args[-2:] == ["10.0.16.50", "bash -s"]
     assert "s3cret pw!" not in " ".join(args) and seen["password"] == "s3cret pw!\n"
-    assert "naviseccli" in seen["script"] and not Path(seen["pwfile"]).exists()
+    # The script reaches the Control Station's bash as bytes with Unix line endings only.
+    assert isinstance(seen["script"], bytes) and b"\r" not in seen["script"] and seen["script"].endswith(b"exit 0\n")
+    assert b"naviseccli" in seen["script"] and not Path(seen["pwfile"]).exists()
 
 
 def test_plink_missing(monkeypatch):
