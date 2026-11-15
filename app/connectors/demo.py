@@ -255,6 +255,13 @@ class DemoVSphere:
     def datastores(self) -> list[dict]:
         return [dict(d) for d in self.data["datastores"]]
 
+    def datastores_with_vms(self) -> list[dict]:
+        """ds-vmfs-01 holds the servers, ds-vmfs-02 is empty, the NFS store holds the lab VMs."""
+        names = sorted(v["name"] for v in self.data["vms"])
+        where = {"ds-vmfs-01": [n for n in names if n.startswith("SRV")], "ds-vmfs-02": [],
+                 "ds-nfs-03": [n for n in names if not n.startswith("SRV")]}
+        return [{**d, "vms": where.get(d["name"], [])} for d in self.data["datastores"]]
+
     def clusters(self) -> list[dict]:
         return [dict(c) for c in self.data["clusters"]]
 
@@ -454,3 +461,74 @@ class DemoSolarWinds:
     def summary(self) -> dict:
         from .solarwinds import summarize
         return summarize(self.nodes(), self.alerts())
+
+
+# --- VNX: a fake Control Station, so the real parser runs on realistic naviseccli output -----------
+
+def _vnx_output() -> str:
+    def lun(n, name, uid_tail, gb, pool, thin="Yes", private="No", state="Ready", faulted="false"):
+        return (f"LOGICAL UNIT NUMBER {n}\nName:  {name}\nUID:  60:06:01:60:AB:CD:12:00:{uid_tail}\n"
+                f"Current Owner:  SP {'AB'[n % 2]}\nUser Capacity (GBs):  {gb:.3f}\n"
+                f"Consumed Capacity (GBs):  {gb * (0.35 if thin == 'Yes' else 1.0):.3f}\nPool Name:  {pool}\n"
+                f"Current State:  {state}\nStatus:  OK(0x0)\nIs Faulted:  {faulted}\nIs Thin LUN:  {thin}\n"
+                f"Is Private:  {private}\n\n")
+    luns = [
+        (0, "ds-vmfs-01", "11:22:33:44:55:66:77:01", 2048, "Pool 0"),
+        (1, "ds-vmfs-02", "11:22:33:44:55:66:77:02", 4096, "Pool 0"),
+        (2, "ds-vmfs-retired", "11:22:33:44:55:66:77:03", 1024, "Pool 1"),
+        (3, "RDM_SQL_LOGS", "11:22:33:44:55:66:77:04", 500, "Pool 0"),
+        (4, "LUN_TEST_07", "11:22:33:44:55:66:77:05", 750, "Pool 1"),
+        (5, "OLD_EXCHANGE_DB", "11:22:33:44:55:66:77:06", 1500, "Pool 1"),
+        (6, "FILE_LUN_0", "11:22:33:44:55:66:77:07", 2000, "Pool 1"),
+        (7, "FILE_LUN_1", "11:22:33:44:55:66:77:08", 2000, "Pool 1"),
+    ]
+    lun_text = "".join(lun(*x) for x in luns) + lun(8, "Reserved LUN Pool 1", "11:22:33:44:55:66:77:09", 100, "Pool 0", private="Yes")
+    pools = (
+        "Pool Name:  Pool 0\nPool ID:  0\nRaid Type:  r_5\nPercent Full Threshold:  70\nDisk Type:  Mixed\nState:  Ready\n"
+        "Status:  OK(0x0)\nUser Capacity (GBs):  12000.000\nConsumed Capacity (GBs):  8930.250\n"
+        "Available Capacity (GBs):  3069.750\nPercent Full:  74.419\nTotal Subscribed Capacity (GBs):  13200.000\n"
+        "Percent Subscribed:  110.000\nLUNs:  0, 1, 3, 8\n\n"
+        "Pool Name:  Pool 1\nPool ID:  1\nRaid Type:  r_6\nPercent Full Threshold:  70\nDisk Type:  NL SAS\nState:  Ready\n"
+        "Status:  OK(0x0)\nUser Capacity (GBs):  20000.000\nConsumed Capacity (GBs):  9200.000\n"
+        "Available Capacity (GBs):  10800.000\nPercent Full:  46.000\nTotal Subscribed Capacity (GBs):  12500.000\n"
+        "Percent Subscribed:  62.500\nLUNs:  2, 4, 5, 6, 7\n\n")
+    groups = (
+        "Storage Group Name:    ESX-Prod-Cluster\nStorage Group UID:     AA:BB:CC:01\nHBA/SP Pairs:\n\n"
+        "  HBA UID                                          SP Name     SPPort\n"
+        "  -------                                          -------     ------\n"
+        "  20:00:00:25:B5:00:00:01:21:00:00:25:B5:00:00:01   SP A         0\nHost name:             esx01.lab.local\n"
+        "  20:00:00:25:B5:00:00:02:21:00:00:25:B5:00:00:02   SP B         0\nHost name:             esx02.lab.local\n\n"
+        "HLU/ALU Pairs:\n\n  HLU Number     ALU Number\n  ----------     ----------\n"
+        "    0               0\n    1               1\n    2               2\n    3               3\nShareable:             YES\n\n"
+        "Storage Group Name:    ~filestorage\nStorage Group UID:     AA:BB:CC:02\nHBA/SP Pairs:\n\n"
+        "HLU/ALU Pairs:\n\n  HLU Number     ALU Number\n  ----------     ----------\n"
+        "    16              6\n    17              7\nShareable:             YES\n\n")
+    return (
+        "@@KASTEC sp spa\n"
+        "@@KASTEC getagent\nAgent Rev:           7.33.9 (1.89)\nName:                VNX-DEMO\nModel:               VNX5400\n"
+        "Serial No:           CKM00DEMO0001\nRevision:            05.33.009.5.236\n"
+        "@@KASTEC faults\nFaulted Subsystem: CKM00DEMO0001\nBus 0 Enclosure 1 Disk 7 : Faulted\n"
+        f"@@KASTEC pools\n{pools}@@KASTEC luns\n{lun_text}@@KASTEC rglun\n@@KASTEC groups\n{groups}"
+        "@@KASTEC slots\n 10 - slot_0 primary control station\n 5 - slot_2 contacted\n 5 - slot_3 contacted\n")
+
+
+class DemoVNX:
+    def __init__(self, conn_id: str, config: dict):
+        from .vnx import VNXConnector
+        self.inner = VNXConnector({"host": "vnx-cs.demo", "username": "nasadmin", "host_key": "SHA256:demo"}, "",
+                                  runner=lambda script, key: (0, _vnx_output(), ""))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def test(self) -> dict:
+        return {"ok": True, "message": "Demo VNX5400 (no real Control Station contacted)"}
+
+    def overview(self) -> dict:
+        return self.inner.overview()
+
+    def summary(self) -> dict:
+        return self.inner.summary()

@@ -1,4 +1,4 @@
-"""KasTec Center: one console for Active Directory, vSphere, iDRAC and SolarWinds."""
+"""KasTec Center: one console for Active Directory, vSphere, iDRAC, SolarWinds and VNX storage."""
 
 import json
 import logging
@@ -24,6 +24,7 @@ from .config import Settings
 from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
+from .connectors.vnx import link_datastores
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -37,6 +38,7 @@ CONFIG_FIELDS = {
     "vsphere": ("host", "port", "verify_ssl", "username"),
     "idrac": ("hosts", "verify_ssl", "username"),
     "solarwinds": ("host", "port", "verify_ssl", "username"),
+    "vnx": ("host", "port", "username", "sp_a", "sp_b", "host_key"),
 }
 
 
@@ -78,7 +80,7 @@ class ShellConnectBody(BaseModel):
 
 
 class ConnectionBody(BaseModel):
-    kind: Literal["ad", "vsphere", "idrac", "solarwinds"]
+    kind: Literal["ad", "vsphere", "idrac", "solarwinds", "vnx"]
     name: str = Field(min_length=1, max_length=80)
     config: dict = {}
     password: str = ""
@@ -245,12 +247,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(404, "Connection not found")
         return conn
 
+    def remember(conn: Connection, connector) -> None:
+        """Save what a connector learned about its server (e.g. the VNX Control Station's SSH key)."""
+        learned = getattr(connector, "learned_config", None) or getattr(getattr(connector, "inner", None), "learned_config", None)
+        if learned and not conn.demo and any(conn.config.get(k) != v for k, v in learned.items()):
+            fresh = store.get(conn.id)
+            if fresh:
+                store.update_config(conn.id, {**fresh.config, **learned})
+
     def gather(conns: list[Connection], fn) -> list[tuple[Connection, object, str | None]]:
         """Run fn(connector) against each connection in parallel; failures don't sink the rest."""
         def one(conn):
             try:
                 with open_connector(conn) as c:
-                    return conn, fn(c), None
+                    result = fn(c)
+                    remember(conn, c)
+                    return conn, result, None
             except ConnectorError as e:
                 return conn, None, str(e)
             except Exception as e:  # noqa: BLE001 - surface unexpected backend errors per connection
@@ -433,7 +445,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not conn:
             raise HTTPException(404, "Connection not found")
         with open_connector(conn) as c:
-            return c.test()
+            result = c.test()
+            remember(conn, c)
+            return result
 
     @app.delete("/api/connections/{conn_id}", dependencies=admin_only)
     def delete_connection(conn_id: str, request: Request):
@@ -870,6 +884,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def solarwinds_overview(conn_id: str):
         with open_connector(get_conn(conn_id, "solarwinds")) as c:
             return c.overview()
+
+    # --- VNX storage -------------------------------------------------------
+
+    @app.get("/api/vnx/{conn_id}/overview", dependencies=api)
+    def vnx_overview(conn_id: str):
+        """The array's health, pools, LUNs and storage groups, with each LUN matched to a vSphere
+        datastore (and the VMs on it) where one has the same name."""
+        conn = get_conn(conn_id, "vnx")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            stores_job = pool.submit(gather, store.list("vsphere"), lambda c: c.datastores_with_vms())
+            with open_connector(conn) as c:
+                data = c.overview()
+                remember(conn, c)
+            stores, errors = [], []
+            for vc, found, error in stores_job.result():
+                if error:
+                    errors.append({"connection": vc.name, "error": error})
+                else:
+                    stores += [{**d, "connection": vc.name} for d in found]
+        link_datastores(data["luns"], stores)
+        data["vsphere"] = {"connections": len(store.list("vsphere")), "datastores": len(stores), "errors": errors}
+        return data
 
     # --- iDRAC -------------------------------------------------------------
 

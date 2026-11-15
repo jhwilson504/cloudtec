@@ -163,6 +163,18 @@ class VSphereConnector:
             for d in self._get("/api/vcenter/datastore")
         ]
 
+    def datastores_with_vms(self) -> list[dict]:
+        """Every datastore with the names of the VMs on it (one request per datastore, a few at a time)."""
+        from concurrent.futures import ThreadPoolExecutor
+        stores = self.datastores()
+
+        def vms_on(d):
+            return sorted(v["name"] for v in self._get("/api/vcenter/vm", datastores=d["id"]))
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            found = list(pool.map(vms_on, stores))
+        return [{**d, "vms": vms} for d, vms in zip(stores, found)]
+
     def clusters(self) -> list[dict]:
         return [
             {

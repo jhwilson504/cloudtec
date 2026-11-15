@@ -121,10 +121,10 @@ function connectionPicker(conns, selected, id) {
 
 const isAdmin = () => state.me?.role === "admin";
 
-const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers", solarwinds: "SolarWinds" };
+const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers", solarwinds: "SolarWinds", vnx: "VNX storage" };
 
 function noConnections(kind) {
-  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds server" }[kind];
+  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds server", vnx: "VNX Control Station" }[kind];
   const article = kind === "idrac" ? "an" : "a";
   if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a KasTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
@@ -256,6 +256,7 @@ async function renderDashboard() {
   const vs = ok.filter((i) => i.kind === "vsphere").map((i) => i.summary);
   const srv = ok.filter((i) => i.kind === "idrac").map((i) => i.summary);
   const sw = ok.filter((i) => i.kind === "solarwinds").map((i) => i.summary);
+  const vnx = ok.filter((i) => i.kind === "vnx").map((i) => i.summary);
   const sum = (arr, k) => arr.reduce((a, s) => a + (s[k] || 0), 0);
   const cap = sum(vs, "capacity"), free = sum(vs, "free_space");
 
@@ -278,6 +279,16 @@ async function renderDashboard() {
         <dt>Warning</dt><dd>${s.warning ? `<span class="badge warn">${s.warning}</span>` : 0}</dd>
         <dt>Active alerts</dt><dd>${s.alerts}${s.critical_alerts ? ` <span class="badge bad">${s.critical_alerts} critical</span>` : ""}</dd>
         <dt>Unmanaged</dt><dd>${s.unmanaged}</dd></dl>`;
+    else if (i.kind === "vnx") {
+      const used = s.capacity_gb ? (1 - s.free_gb / s.capacity_gb) * 100 : 0;
+      body = `<dl>
+        <dt>Array</dt><dd>${esc(s.model || "VNX")} <span class="muted">${esc(s.serial || "")}</span></dd>
+        <dt>Faults</dt><dd>${s.faults_ok ? '<span class="badge ok">None</span>' : `<span class="badge bad">${s.faults}</span>`}</dd>
+        <dt>Pools</dt><dd>${s.pools}</dd>
+        <dt>LUNs</dt><dd>${s.luns}${s.not_presented ? ` <span class="badge warn" title="Not presented to any host">${s.not_presented} unused</span>` : ""}</dd>
+        <dt>Pool space used</dt><dd>${fmtBytes((s.capacity_gb - s.free_gb) * 1024 ** 3)} / ${fmtBytes(s.capacity_gb * 1024 ** 3)}</dd></dl>
+        <div class="meter ${used > 85 ? "hot" : ""}"><div style="width:${used.toFixed(1)}%"></div></div>`;
+    }
     else if (i.kind === "idrac") body = `<dl>
         <dt>Servers</dt><dd>${s.reachable} reachable / ${s.servers}</dd>
         <dt>Healthy</dt><dd>${s.healthy}</dd>
@@ -293,7 +304,7 @@ async function renderDashboard() {
         <dt>Storage used</dt><dd>${fmtBytes(s.capacity - s.free_space)} / ${fmtBytes(s.capacity)}</dd></dl>
         <div class="meter ${used > 85 ? "hot" : ""}"><div style="width:${used.toFixed(1)}%"></div></div>`;
     }
-    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers", solarwinds: "#/solarwinds" }[i.kind];
+    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers", solarwinds: "#/solarwinds", vnx: "#/vnx" }[i.kind];
     return `<div class="card conn-card"><div class="head">
         <div><a class="link" href="${link}" data-pick="${i.kind}:${esc(i.id)}"><b>${esc(i.name)}</b></a>
           <div class="sub muted">${KIND_LABELS[i.kind]}${i.demo ? " · demo" : ""}</div></div>
@@ -312,13 +323,14 @@ async function renderDashboard() {
       ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
       ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
       ${srv.length ? stat("Physical servers", fmtNum(sum(srv, "servers")), `${fmtNum(sum(srv, "attention"))} need attention`) : ""}
+      ${vnx.length ? stat("VNX pool free", fmtBytes(sum(vnx, "free_gb") * 1024 ** 3), `of ${fmtBytes(sum(vnx, "capacity_gb") * 1024 ** 3)} · ${fmtNum(sum(vnx, "faults"))} faults`) : ""}
       ${sw.length ? stat("Monitored nodes", fmtNum(sum(sw, "nodes")), `${fmtNum(sum(sw, "down"))} down · ${fmtNum(sum(sw, "alerts"))} alerts`) : ""}
     </div>
     <div class="grid">${certTile(certs)}${cards}${resetTile()}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
-    state[{ ad: "ad", vsphere: "vs", idrac: "idrac", solarwinds: "sw" }[kind]] = id;
+    state[{ ad: "ad", vsphere: "vs", idrac: "idrac", solarwinds: "sw", vnx: "vnx" }[kind]] = id;
   }));
 }
 
@@ -1144,6 +1156,133 @@ async function renderSolarWinds() {
   load();
 }
 
+// ---- VNX storage ----------------------------------------------------------------
+
+// What each LUN is used for, as worked out on the server: [badge class, label, explanation].
+const LUN_USE = {
+  datastore: ["ok", "Datastore", "Backs a vSphere datastore that has VMs on it."],
+  datastore_empty: ["warn", "Empty datastore", "Backs a vSphere datastore with no VMs on it: a cleanup candidate once you've checked it holds no templates, ISOs or files anyone needs."],
+  not_presented: ["warn", "Not presented", "In no host's storage group, so no server can be using it: a cleanup candidate."],
+  unmatched: ["info", "Check", "Presented to hosts, but no vSphere datastore has a matching name. It may be an RDM, a datastore with a different name, or used by a host outside vCenter."],
+  file: ["plain", "VNX File", "Used by the VNX's own Data Movers (file systems, CIFS/NFS shares)."],
+  private: ["plain", "System", "A private LUN the array uses itself (e.g. the reserved LUN pool)."],
+  presented: ["info", "Presented", "Presented to hosts."],
+};
+const CLEANUP = new Set(["not_presented", "datastore_empty"]);
+const vnxGb = (v) => (v == null ? "–" : fmtBytes(v * 1024 ** 3));
+
+async function renderVNX() {
+  loading();
+  const conns = (await api("GET", "/api/connections")).filter((c) => c.kind === "vnx");
+  const head = `<div class="page-head"><div><h1>Storage (VNX)</h1>
+      <p class="muted" style="margin:0">Health, storage pools and LUNs from your VNX arrays, read through the Control Station
+        the same way you do in PuTTY. Each LUN is matched to its vSphere datastore and VMs. Read-only: nothing on the arrays is changed.</p></div>
+      ${conns.length ? '<button class="btn" id="vnx-refresh">Refresh</button>' : ""}</div>`;
+  if (!conns.length) { view.innerHTML = head + noConnections("vnx"); return; }
+  if (!conns.some((c) => c.id === state.vnx)) state.vnx = conns[0].id;
+  let filter = "cleanup";
+
+  view.innerHTML = `${head}
+    <div class="toolbar">${connectionPicker(conns, state.vnx, "vnx-conn")}
+      <button class="btn" id="vnx-csv" disabled>Download LUNs (CSV)</button></div>
+    <div id="vnx-body"><p class="muted">Asking the VNX… this can take up to a minute.</p></div>`;
+
+  async function load() {
+    const box = $("#vnx-body");
+    $("#vnx-csv").disabled = true;
+    box.innerHTML = '<p class="muted">Asking the VNX… this can take up to a minute.</p>';
+    let o;
+    try {
+      o = await api("GET", `/api/vnx/${state.vnx}/overview`);
+    } catch (err) {
+      box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+      return;
+    }
+    const luns = o.luns.filter((l) => l.use !== "private");
+    const cleanup = luns.filter((l) => CLEANUP.has(l.use));
+    const check = luns.filter((l) => l.use === "unmatched");
+    const cap = o.pools.reduce((a, p) => a + (p.user_gb || 0), 0), free = o.pools.reduce((a, p) => a + (p.free_gb || 0), 0);
+    const stat = (label, value, sub = "") =>
+      `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
+    const reclaim = cleanup.reduce((a, l) => a + (l.consumed_gb ?? l.user_gb ?? 0), 0);
+
+    const useBadge = (l) => { const [cls, label, tip] = LUN_USE[l.use] ?? ["plain", l.use, ""]; return `<span class="badge ${cls}" title="${esc(tip)}">${label}</span>`; };
+    const draw = () => {
+      const q = ($("#vnx-q")?.value || "").trim().toLowerCase();
+      const shown = luns.filter((l) => (filter === "all" || (filter === "cleanup" ? CLEANUP.has(l.use) : l.use === "unmatched"))
+        && (!q || [l.name, l.naa, l.pool, l.datastore?.name, ...(l.hosts || []), ...(l.storage_groups || [])]
+          .some((f) => (f || "").toLowerCase().includes(q))));
+      $("#vnx-luns").innerHTML = table(["LUN", "Size", "Pool", "Presented to", "vSphere datastore", "Use"], shown.map((l) => `<tr>
+          <td><b>${esc(l.name)}</b> <span class="muted">#${l.number}</span><div class="sub mono">${esc(l.naa || l.uid || "")}</div></td>
+          <td>${vnxGb(l.user_gb)}${l.thin ? `<div class="sub">thin, ${vnxGb(l.consumed_gb)} used</div>` : ""}</td>
+          <td>${esc(l.pool || "")}</td>
+          <td>${l.hosts?.length ? l.hosts.map(esc).join("<br>") : l.storage_groups?.length ? esc(l.storage_groups.join(", ")) : '<span class="muted">nothing</span>'}</td>
+          <td>${l.datastore ? `<b>${esc(l.datastore.name)}</b><div class="sub">${l.datastore.vms == null ? "" : `${l.datastore.vms.length} VM${l.datastore.vms.length === 1 ? "" : "s"}`}${l.datastore.matched_by === "similar name" ? " · matched by similar name" : ""}</div>` : '<span class="muted">–</span>'}</td>
+          <td>${useBadge(l)}${l.faulted || (l.state && l.state !== "Ready" && l.state !== "Bound") ? ` <span class="badge bad">${esc(l.state || "Faulted")}</span>` : ""}</td></tr>`),
+        filter === "cleanup" ? "No cleanup candidates: every LUN is presented to hosts and in use." : filter === "check" ? "Nothing to check." : "No LUNs match.");
+    };
+
+    box.innerHTML = `
+      ${o.faults.ok ? "" : `<div class="notice bad" style="margin-bottom:12px"><b>The array reports ${o.faults.items.length} fault${o.faults.items.length === 1 ? "" : "s"}:</b><br>${o.faults.items.map(esc).join("<br>")}</div>`}
+      ${o.vsphere.errors.length ? `<div class="notice warn" style="margin-bottom:12px">Couldn't read datastores from ${o.vsphere.errors.map((e) => esc(e.connection)).join(", ")}, so LUNs can't all be matched: ${esc(o.vsphere.errors[0].error)}</div>` : ""}
+      ${!o.vsphere.connections ? '<div class="notice" style="margin-bottom:12px">Add your vCenter on the Connections page to match each LUN to its datastore and VMs.</div>' : ""}
+      <div class="card section"><div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div><b style="font-size:16px">${esc(o.agent.name || o.agent.model)}</b>
+          <div class="muted">${esc(o.agent.model)} · serial <span class="mono">${esc(o.agent.serial)}</span> · revision ${esc(o.agent.revision)}
+            · read through ${esc(o.sp || "spa")} via ${esc(o.control_station)}</div></div>
+        <div class="row" style="gap:6px;flex-wrap:wrap">${o.faults.ok ? '<span class="badge ok">No faults</span>' : `<span class="badge bad">${o.faults.items.length} fault${o.faults.items.length === 1 ? "" : "s"}</span>`}
+          ${o.slots.map((s) => `<span class="badge ${s.ok ? "ok" : "bad"}" title="getreason ${s.code}">${esc(s.label || s.slot)}: ${esc(s.state)}</span>`).join("")}</div>
+      </div></div>
+      <div class="stats">
+        ${stat("Pool capacity", vnxGb(cap), `${o.pools.length} pool${o.pools.length === 1 ? "" : "s"}`)}
+        ${stat("Pool free", vnxGb(free), cap ? `${(free / cap * 100).toFixed(0)}% free` : "")}
+        ${stat("LUNs", luns.length, ((n) => `${n} back${n === 1 ? "s a datastore" : " datastores"} with VMs`)(luns.filter((l) => l.use === "datastore").length))}
+        ${stat("Cleanup candidates", cleanup.length, cleanup.length ? `about ${vnxGb(reclaim)} to reclaim` : "nothing to clean up")}
+        ${stat("To check", check.length, "presented, no matching datastore")}
+      </div>
+      <div class="section"><h2>Storage pools</h2>
+        ${table(["Pool", "State", "Used", "Capacity", "Free", "Subscribed", "LUNs"], o.pools.map((p) => {
+          const hot = (p.percent_full ?? 0) >= (p.threshold || 85);
+          return `<tr><td><b>${esc(p.name)}</b><div class="sub">${esc([p.raid, p.disk_type].filter(Boolean).join(" · "))}</div></td>
+            <td>${p.status?.startsWith("OK") ? '<span class="badge ok">OK</span>' : `<span class="badge bad">${esc(p.status || p.state || "?")}</span>`}</td>
+            <td style="min-width:160px"><div class="meter ${hot ? "hot" : ""}"><div style="width:${Math.min(100, p.percent_full || 0)}%"></div></div>
+              <div class="sub">${p.percent_full ?? "–"}% full${p.threshold ? ` (alert at ${p.threshold}%)` : ""}</div></td>
+            <td>${vnxGb(p.user_gb)}</td><td>${vnxGb(p.free_gb)}</td>
+            <td class="${(p.percent_subscribed ?? 0) > 100 ? "error" : ""}" title="Thin LUNs can promise more than the pool holds">${p.percent_subscribed ?? "–"}%</td>
+            <td>${p.luns.length}</td></tr>`;
+        }), "No storage pools (this array may only use RAID groups).")}</div>
+      <div class="section"><div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:10px"><h2 style="margin:0">LUNs</h2>
+        <div class="row"><div class="segmented" id="vnx-filter"><button data-f="cleanup" class="active">Cleanup candidates (${cleanup.length})</button><button data-f="check">To check (${check.length})</button><button data-f="all">All ${luns.length}</button></div>
+        <input type="search" id="vnx-q" placeholder="Find a LUN, datastore or host…" style="width:240px"></div></div>
+        <div id="vnx-luns" style="margin-top:10px"></div>
+        <p class="muted small-note">LUNs are matched to datastores by name, because vCenter's API doesn't say which LUN backs which datastore.
+          Before removing a LUN, confirm in vSphere (datastore → Configure → Device Backing) that its NAA ID above isn't in use, and that a backup exists.</p></div>
+      <div class="section"><h2>Storage groups</h2>
+        ${table(["Storage group", "Hosts", "LUNs"], o.groups.filter((g) => !g.special || g.luns.length).map((g) => `<tr>
+          <td><b>${esc(g.name)}</b>${g.name === "~filestorage" ? '<div class="sub">the VNX File side (Data Movers)</div>' : ""}</td>
+          <td>${g.hosts.length ? g.hosts.map(esc).join(", ") : '<span class="muted">–</span>'}</td><td>${g.luns.length}</td></tr>`), "No storage groups.")}</div>
+      <p class="muted small-note">From ${esc(o.control_station)} at ${esc(new Date().toLocaleTimeString())}.</p>`;
+    $("#vnx-filter").querySelectorAll("button").forEach((b) => b.onclick = () => {
+      filter = b.dataset.f;
+      $("#vnx-filter").querySelectorAll("button").forEach((x) => x.classList.toggle("active", x === b));
+      draw();
+    });
+    $("#vnx-q").oninput = debounce(draw, 200);
+    draw();
+    $("#vnx-csv").disabled = false;
+    $("#vnx-csv").onclick = () => downloadCsv(`vnx-luns-${o.agent.serial}-${new Date().toISOString().slice(0, 10)}.csv`,
+      ["LUN number", "LUN name", "NAA ID", "Size (GB)", "Consumed (GB)", "Thin", "Pool", "State", "Storage groups", "Hosts",
+        "Datastore", "VMs on datastore", "Use", "Cleanup candidate"],
+      luns.map((l) => [l.number, l.name, l.naa || l.uid, l.user_gb, l.consumed_gb, l.thin ? "Yes" : "No", l.pool, l.state,
+        (l.storage_groups || []).join("; "), (l.hosts || []).join("; "), l.datastore?.name || "",
+        l.datastore?.vms ? l.datastore.vms.join("; ") : "", (LUN_USE[l.use] || [, l.use])[1], CLEANUP.has(l.use) ? "Yes" : ""]));
+  }
+
+  $("#vnx-conn")?.addEventListener("change", (e) => { state.vnx = e.target.value; load(); });
+  $("#vnx-refresh").onclick = load;
+  load();
+}
+
 // ---- servers (iDRAC) -------------------------------------------------------
 
 const HEALTH = { OK: ["ok", "Healthy"], Warning: ["warn", "Warning"], Critical: ["bad", "Critical"] };
@@ -1479,7 +1618,7 @@ async function renderConnections() {
     <div class="card section">
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <h2 style="margin:0">Add a connection</h2>
-        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button><button data-k="solarwinds">SolarWinds</button></div>
+        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button><button data-k="solarwinds">SolarWinds</button><button data-k="vnx">VNX</button></div>
       </div>
       <form id="conn-form" class="form" autocomplete="off"></form>
     </div>`;
@@ -1505,23 +1644,26 @@ async function renderConnections() {
 
   function drawForm() {
     kindBtns.forEach((b) => b.classList.toggle("active", b.dataset.k === state.connKind));
-    const ad = state.connKind === "ad", idrac = state.connKind === "idrac", sw = state.connKind === "solarwinds";
+    const ad = state.connKind === "ad", idrac = state.connKind === "idrac", sw = state.connKind === "solarwinds", vnx = state.connKind === "vnx";
     const where = idrac
       ? `<label class="full"><span>iDRAC addresses, one per line (they must all use the account below)</span>
           <textarea name="hosts" rows="4" spellcheck="false" placeholder="10.0.10.11
 10.0.10.12"></textarea></label>`
-      : `<label>${ad ? "Domain controller" : sw ? "SolarWinds server" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : sw ? "btc-sw-app.btcbahamas.com" : "vcenter.corp.example.com"}"></label>
-      <label>Port <input name="port" type="number" placeholder="${ad ? "636" : sw ? "17774" : "443"}"></label>`;
+      : `<label>${ad ? "Domain controller" : sw ? "SolarWinds server" : vnx ? "Control Station (the address you open in PuTTY)" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : sw ? "btc-sw-app.btcbahamas.com" : vnx ? "10.0.16.50 or vnx-cs.btcbahamas.com" : "vcenter.corp.example.com"}"></label>
+      <label>Port <input name="port" type="number" placeholder="${ad ? "636" : sw ? "17774" : vnx ? "22" : "443"}"></label>`;
     $("#conn-form").innerHTML = `
-      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : sw ? "SolarWinds" : "Production vCenter"}"></label>
+      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : sw ? "SolarWinds" : vnx ? "JFK VNX" : "Production vCenter"}"></label>
       ${where}
       ${ad ? `<label class="full">Base DN <input name="base_dn" placeholder="DC=corp,DC=example,DC=com"></label>
         <label>Bind account <input name="bind_user" placeholder="svc-cloudtec@corp.example.com"></label>`
-           : `<label>Username <input name="username" placeholder="${idrac ? "root, or a read-only iDRAC user" : sw ? "a SolarWinds web console account (read-only is enough)" : "administrator@vsphere.local"}"></label>`}
+           : `<label>Username <input name="username" placeholder="${idrac ? "root, or a read-only iDRAC user" : sw ? "a SolarWinds web console account (read-only is enough)" : vnx ? "nasadmin (the account you use in PuTTY)" : "administrator@vsphere.local"}"></label>`}
       <label>Password <input name="password" type="password" autocomplete="new-password"></label>
+      ${vnx ? `<label>SP A name <input name="sp_a" placeholder="spa"></label><label>SP B name <input name="sp_b" placeholder="spb"></label>
+        <label class="full">SSH key fingerprint (optional) <input name="host_key" placeholder="SHA256:… (leave empty: KasTec saves it on the first connection)"></label>
+        <p class="full muted small-note" style="margin:0">KasTec signs in with PuTTY's plink, as you do in PuTTY, and only runs commands that read information. It saves the password encrypted and signs in by itself every time.</p>` : ""}
       <div class="full row" style="gap:20px">
         ${ad ? '<label class="inline"><input type="checkbox" name="use_ssl" checked> Use LDAPS (required for password resets)</label>' : ""}
-        <label class="inline"><input type="checkbox" name="verify_ssl" ${idrac || sw ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : sw ? " (SolarWinds' API uses its own self-signed certificate unless you replaced it)" : ""}</label>
+        <label class="inline ${vnx ? "hidden" : ""}"><input type="checkbox" name="verify_ssl" ${idrac || sw ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : sw ? " (SolarWinds' API uses its own self-signed certificate unless you replaced it)" : ""}</label>
         <label class="inline"><input type="checkbox" name="demo"> Demo mode (sample data, no server needed)</label>
       </div>
       <div class="full" id="form-msg"></div>
@@ -1530,12 +1672,12 @@ async function renderConnections() {
     const form = $("#conn-form");
     form.demo.onchange = () => {
       form.querySelectorAll("input:not([name=demo]):not([name=name]), textarea").forEach((el) => el.disabled = form.demo.checked);
-      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : sw ? "Demo SolarWinds" : "Demo vCenter";
+      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : sw ? "Demo SolarWinds" : vnx ? "Demo VNX" : "Demo vCenter";
     };
     const body = () => {
       const f = new FormData(form);
       const config = {};
-      for (const key of ["host", "port", "base_dn", "bind_user", "username"]) {
+      for (const key of ["host", "port", "base_dn", "bind_user", "username", "sp_a", "sp_b", "host_key"]) {
         const v = (f.get(key) || "").trim();
         if (v) config[key] = key === "port" ? Number(v) : v;
       }
@@ -2215,6 +2357,7 @@ const routes = {
   vsphere: renderVSphere,
   servers: renderServers,
   solarwinds: renderSolarWinds,
+  vnx: renderVNX,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
   powershell: renderShell,
