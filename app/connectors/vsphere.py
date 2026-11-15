@@ -186,6 +186,11 @@ class VSphereConnector:
             for c in self._get("/api/vcenter/cluster")
         ]
 
+    def clusters_with_hosts(self) -> list[dict]:
+        """Each cluster with the names of its hosts (to suggest which VNX storage groups to present a LUN to)."""
+        return [{**c, "hosts": sorted(h["name"] for h in self._get("/api/vcenter/host", clusters=c["id"]))}
+                for c in self.clusters()]
+
     def topology(self) -> dict:
         """vCenter > datacenters > clusters > hosts > VMs, plus each datacenter's datastores and networks."""
         def vm(v):

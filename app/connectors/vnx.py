@@ -244,16 +244,32 @@ def summarize(agent: dict, faults: dict, pools: list[dict], luns: list[dict], sl
 
 # --- the connector ----------------------------------------------------------------------------
 
+def _prefix(sp_a: str, sp_b: str) -> list[str]:
+    """Use SP A, or SP B when A doesn't answer. Every naviseccli call reads /dev/null, so a command that
+    unexpectedly asks a question gets no answer (and fails) instead of reading the next line of this script."""
+    return ["export NAS_DB=/nas", "N=/nas/sbin/naviseccli",
+            f"SP={sp_a}; $N -h $SP getagent </dev/null >/dev/null 2>&1 || SP={sp_b}", 'echo "@@KASTEC sp $SP"']
+
+
 def _script(sp_a: str, sp_b: str, full: bool) -> str:
     navi = [("getagent", "getagent"), ("faults", "faults -list"), ("pools", "storagepool -list"),
             ("luns", "lun -list"), ("groups", "storagegroup -list -host")]
     if full:
         navi.append(("rglun", "getlun -name -uid -capacity -state -rg"))
-    lines = ["export NAS_DB=/nas", "N=/nas/sbin/naviseccli",
-             f"SP={sp_a}; $N -h $SP getagent >/dev/null 2>&1 || SP={sp_b}", 'echo "@@KASTEC sp $SP"']
-    lines += [f'echo "@@KASTEC {key}"; $N -h $SP {cmd} 2>&1' for key, cmd in navi]
-    lines += ['echo "@@KASTEC slots"; /nas/sbin/getreason 2>&1', "exit 0"]
+    lines = _prefix(sp_a, sp_b)
+    lines += [f'echo "@@KASTEC {key}"; $N -h $SP {cmd} </dev/null 2>&1' for key, cmd in navi]
+    lines += ['echo "@@KASTEC slots"; /nas/sbin/getreason </dev/null 2>&1', "exit 0"]
     return "\n".join(lines) + "\n"
+
+
+def sh_quote(value: str) -> str:
+    """A single-quoted shell word. Callers have already refused quotes and line breaks."""
+    if not value or "'" in value or "\n" in value or "\r" in value:
+        raise ConnectorError(f"{value!r} can't be used in a VNX command")
+    return f"'{value}'"
+
+
+LUN_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$")
 
 
 def split_sections(text: str) -> dict[str, str]:
@@ -366,6 +382,53 @@ class VNXConnector:
         return {"agent": agent, "sp": sec.get("sp", "").strip(), "faults": parse_faults(sec.get("faults", "")),
                 "pools": parse_pools(sec.get("pools", "")), "luns": luns, "groups": groups,
                 "slots": parse_slots(sec.get("slots", ""))}
+
+    def read(self) -> dict:
+        """Pools, LUNs and storage groups, without the slower RAID-group listing (for planning changes)."""
+        return self._read(False)
+
+    # --- changes (admin only, from the "Create LUN" form) -----------------------------------
+
+    def create_lun(self, name: str, pool: str, size_gb: int, thin: bool, sp: str) -> dict:
+        """lun -create in a storage pool, then read the new LUN back by name. Returns the parsed LUN."""
+        if not LUN_NAME.match(name) or sp not in ("a", "b") or not 1 <= int(size_gb) <= 65536:
+            raise ConnectorError("Invalid LUN settings")
+        create = (f"lun -create -type {'Thin' if thin else 'NonThin'} -capacity {int(size_gb)} -sq gb "
+                  f"-poolName {sh_quote(pool)} -name {sh_quote(name)} -sp {sp}")
+        lines = _prefix(self.sp_a, self.sp_b) + [
+            f'echo "@@KASTEC create"; $N -h $SP {create} </dev/null 2>&1; echo "@@KASTEC rc $?"',
+            f'echo "@@KASTEC luns"; $N -h $SP lun -list -name {sh_quote(name)} </dev/null 2>&1', "exit 0"]
+        sec = split_sections(self._ssh("\n".join(lines) + "\n"))
+        found = [lun for lun in parse_luns(sec.get("luns", "")) if lun["name"] == name]
+        if not found:
+            said = " ".join(sec.get("create", "").split())[:400]
+            raise ConnectorError(f"The VNX didn't create LUN {name}: {said or 'no answer'}")
+        return found[0]
+
+    def add_to_group(self, group: str, hlu: int, alu: int) -> None:
+        """storagegroup -addhlu, then check the group really lists the LUN at that HLU."""
+        if not 0 <= int(hlu) <= 255 or int(alu) < 0:
+            raise ConnectorError("Invalid HLU or LUN number")
+        lines = _prefix(self.sp_a, self.sp_b) + [
+            f'echo "@@KASTEC add"; $N -h $SP storagegroup -addhlu -gname {sh_quote(group)} -hlu {int(hlu)} -alu {int(alu)} </dev/null 2>&1',
+            f'echo "@@KASTEC groups"; $N -h $SP storagegroup -list -gname {sh_quote(group)} -host </dev/null 2>&1', "exit 0"]
+        sec = split_sections(self._ssh("\n".join(lines) + "\n"))
+        groups = [g for g in parse_groups(sec.get("groups", "")) if g["name"] == group]
+        if not groups or {"hlu": int(hlu), "alu": int(alu)} not in groups[0]["luns"]:
+            said = " ".join(sec.get("add", "").split())[:400]
+            raise ConnectorError(f"The VNX didn't add LUN {alu} to {group}: {said or 'no answer'}")
+
+    def run_command(self, command: str) -> dict:
+        """Run an administrator's own command on the Control Station, as they would in PuTTY. Each command
+        is a fresh sign-in (like opening PuTTY again): there's no 'cd' or variables kept between commands,
+        and it can't answer questions, so it reads /dev/null."""
+        command = command.replace("\r", "")
+        script = ("export NAS_DB=/nas; export PATH=$PATH:/nas/bin:/nas/sbin\n"
+                  f'echo "@@KASTEC out"\n( {command}\n) </dev/null 2>&1\necho "@@KASTEC rc $?"\nexit 0\n')
+        sec = split_sections(self._ssh(script))
+        out = sec.get("out", "")
+        return {"output": out[:200_000] + ("\n… (output cut at 200,000 characters)" if len(out) > 200_000 else ""),
+                "exit_code": int((sec.get("rc") or "0").strip() or 0)}
 
     # --- reads ---------------------------------------------------------------------------
 

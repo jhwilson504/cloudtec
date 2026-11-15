@@ -314,3 +314,14 @@ body.popout .term { height: calc(100vh - 150px); }
 .theme-switch button + button { border-left: 1px solid var(--border); }
 .theme-switch button:hover { color: var(--text); background: var(--panel-2); }
 .theme-switch button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+
+/* Create LUN form */
+.pv-groups { display: grid; gap: 6px; margin-top: 6px; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
+.pv-groups label.inline { align-items: flex-start; }
+.pv-ds { padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); }
+.pv-summary { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; margin: 10px 0; }
+.pv-summary dt { color: var(--muted); }
+.pv-summary dd { margin: 0; }
+.pv-steps { white-space: pre-wrap; word-break: break-word; background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0 0 8px; }
+#vnx-cmd .term { max-height: 420px; overflow: auto; }

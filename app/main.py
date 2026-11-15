@@ -25,6 +25,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
+from . import provision
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -118,6 +119,29 @@ class RestartDCBody(BaseModel):
     confirm: str
     # Required to restart when a pre-check fails (e.g. no other DC in the site is answering); recorded.
     override_reason: str = Field(default="", max_length=500)
+
+
+class DatastoreBody(BaseModel):
+    connection_id: str
+    cluster: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=80)
+    vmfs: Literal["auto", "5", "6"] = "auto"
+
+
+class ProvisionBody(BaseModel):
+    name: str = Field(min_length=1, max_length=63)
+    pool: str = Field(min_length=1, max_length=200)
+    size_gb: int = Field(ge=1, le=65536)
+    thin: bool = True
+    sp: Literal["auto", "a", "b"] = "auto"
+    storage_groups: list[str] = Field(default_factory=list, max_length=32)
+    hlu: int | None = Field(default=None, ge=0, le=255)
+    datastore: DatastoreBody | None = None
+    confirm: str = ""
+
+
+class VNXCommandBody(BaseModel):
+    command: str = Field(min_length=1, max_length=20_000)
 
 
 class DCNameBody(BaseModel):
@@ -906,6 +930,123 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         link_datastores(data["luns"], stores)
         data["vsphere"] = {"connections": len(store.list("vsphere")), "datastores": len(stores), "errors": errors}
         return data
+
+    provision_lock = threading.Lock()
+
+    def powercli_installed() -> bool:
+        if not exe:
+            return False
+        ok, out = powershell.run_script(exe, provision.POWERCLI_CHECK, timeout=90)
+        return ok and "POWERCLI|yes" in out
+
+    def provision_state(conn: Connection, body: ProvisionBody) -> tuple[dict, dict | None, Connection | None]:
+        """A fresh read of the array, and of the chosen vCenter when a datastore is wanted."""
+        with open_connector(conn) as c:
+            array = c.read()
+            remember(conn, c)
+        if not body.datastore:
+            return array, None, None
+        vconn = store.get(body.datastore.connection_id)
+        if not vconn or vconn.kind != "vsphere":
+            raise HTTPException(404, "vCenter connection not found")
+        with open_connector(vconn) as v:
+            vc = {"name": vconn.name, "clusters": v.clusters_with_hosts(), "datastores": [d["name"] for d in v.datastores()],
+                  "powercli": True if vconn.demo else powercli_installed()}
+        return array, vc, vconn
+
+    @app.get("/api/vnx/{conn_id}/provision/options", dependencies=admin_only)
+    def vnx_provision_options(conn_id: str):
+        """What the Create LUN form can offer: pools, storage groups and each vCenter's clusters."""
+        conn = get_conn(conn_id, "vnx")
+        with open_connector(conn) as c:
+            array = c.read()
+            remember(conn, c)
+        vcenters, errors = [], []
+        for vc, clusters, error in gather(store.list("vsphere"), lambda v: v.clusters_with_hosts()):
+            if error:
+                errors.append({"connection": vc.name, "error": error})
+            else:
+                vcenters.append({"id": vc.id, "name": vc.name, "demo": vc.demo, "clusters": clusters})
+        return {
+            "array": {"model": array["agent"]["model"], "serial": array["agent"]["serial"]},
+            "pools": [{k: p[k] for k in ("name", "free_gb", "user_gb", "percent_full", "percent_subscribed", "status")} for p in array["pools"]],
+            "storage_groups": [{"name": g["name"], "hosts": g["hosts"], "luns": len(g["luns"])} for g in array["groups"] if not g["special"]],
+            "lun_names": [lun["name"] for lun in array["luns"]],
+            "vcenters": vcenters, "errors": errors, "powershell": bool(exe),
+        }
+
+    @app.post("/api/vnx/{conn_id}/provision/plan", dependencies=admin_only)
+    def vnx_provision_plan(conn_id: str, body: ProvisionBody):
+        array, vc, _ = provision_state(get_conn(conn_id, "vnx"), body)
+        return provision.plan(body.model_dump(), array, vc)
+
+    @app.post("/api/vnx/{conn_id}/provision", dependencies=admin_only)
+    def vnx_provision(conn_id: str, body: ProvisionBody, request: Request):
+        """Create the LUN, add it to the storage groups, then create the datastore: each step only if the one
+        before worked, each one recorded in the activity log."""
+        conn = get_conn(conn_id, "vnx")
+        if body.confirm.strip() != body.name.strip():
+            raise HTTPException(422, "Type the LUN name to confirm.")
+        if not provision_lock.acquire(blocking=False):
+            raise HTTPException(409, "KasTec is already creating a LUN. Wait for it to finish.")
+        try:
+            array, vc, vconn = provision_state(conn, body)
+            p = provision.plan(body.model_dump(), array, vc)
+            if not p["ok"]:
+                raise HTTPException(422, " ".join(p["errors"]))
+            steps = []
+
+            def step(title, ok, detail):
+                steps.append({"title": title, "ok": ok, "detail": detail})
+                audit(request, f"VNX: {title}" + ("" if ok else " (failed)"), detail[:500], conn)
+                return ok
+
+            lun_cfg = p["lun"]
+            try:
+                with open_connector(conn) as c:
+                    lun = c.create_lun(lun_cfg["name"], lun_cfg["pool"], lun_cfg["size_gb"], lun_cfg["thin"], lun_cfg["sp"])
+                    step(f"Created LUN {lun['name']}", True,
+                         f"LUN {lun['number']}, {lun_cfg['size_gb']} GB {'thin' if lun_cfg['thin'] else 'thick'} in {lun_cfg['pool']}, "
+                         f"owned by SP {lun_cfg['sp'].upper()}, {lun['naa']}")
+                    for g in p["storage_groups"]:
+                        c.add_to_group(g, p["hlu"], lun["number"])
+                        step(f"Presented it to {g}", True, f"HLU {p['hlu']}")
+            except ConnectorError as e:
+                step("Presenting the LUN to its storage groups" if steps else f"Creating LUN {lun_cfg['name']}", False, str(e))
+                return {"ok": False, "steps": steps,
+                        "note": (f"LUN {lun_cfg['name']} exists on the array; KasTec didn't remove it. Fix the problem above and "
+                                 "finish in Unisphere or with the Control Station commands box.") if len(steps) > 1 else ""}
+
+            ds = p["datastore"]
+            if ds:
+                title = f"Created datastore {ds['name']}"
+                if vconn.demo:
+                    try:
+                        with open_connector(vconn) as v:
+                            step(title, True, v.create_datastore(ds["cluster"], ds["name"], lun["naa"], lun_cfg["size_gb"], ds["vmfs"]))
+                    except ConnectorError as e:
+                        step(f"Creating datastore {ds['name']}", False, str(e))
+                else:
+                    ok, out = powershell.run_script(exe, provision.datastore_script(vconn, ds["cluster"], lun["naa"], ds["name"], ds["vmfs"]),
+                                                    timeout=900)
+                    done = provision.datastore_result(out) if ok else None
+                    step(title if done else f"Creating datastore {ds['name']}", bool(done), done or out[-1500:])
+            ok = all(s["ok"] for s in steps)
+            return {"ok": ok, "steps": steps, "lun": lun,
+                    "note": "" if ok else (f"LUN {lun['name']} ({lun['naa']}) was created and presented; only the datastore "
+                                          "is missing. Fix the problem above, then create the datastore in vSphere on that naa ID.")}
+        finally:
+            provision_lock.release()
+
+    @app.post("/api/vnx/{conn_id}/run", dependencies=admin_only)
+    def vnx_run(conn_id: str, body: VNXCommandBody, request: Request):
+        """An administrator's own command on the Control Station, like typing it in PuTTY."""
+        conn = get_conn(conn_id, "vnx")
+        audit(request, "VNX: ran a Control Station command", body.command[:500], conn)
+        with open_connector(conn) as c:
+            result = c.run_command(body.command)
+            remember(conn, c)
+        return result
 
     # --- iDRAC -------------------------------------------------------------
 

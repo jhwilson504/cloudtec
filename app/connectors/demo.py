@@ -265,6 +265,19 @@ class DemoVSphere:
     def clusters(self) -> list[dict]:
         return [dict(c) for c in self.data["clusters"]]
 
+    def clusters_with_hosts(self) -> list[dict]:
+        hosts = {"Prod-Cluster": ["esx01.lab.local", "esx02.lab.local"], "Lab-Cluster": ["esx03.lab.local"]}
+        return [{**c, "hosts": hosts.get(c["name"], [])} for c in self.data["clusters"]]
+
+    def create_datastore(self, cluster: str, name: str, naa: str, size_gb: int, vmfs: str) -> str:
+        if cluster != "Prod-Cluster":
+            raise ConnectorError(f"The hosts in {cluster} don't see {naa}: in the demo only Prod-Cluster is in the storage group")
+        cap = int(size_gb) * 1024 ** 3
+        with _lock:
+            self.data["datastores"].append({"id": f"datastore-{100 + len(self.data['datastores'])}", "name": name,
+                                            "type": "VMFS", "capacity": cap, "free_space": int(cap * 0.99)})
+        return f"Created VMFS-{'5' if vmfs == 'auto' else vmfs} datastore {name} ({size_gb} GB) on esx01.lab.local; esx02.lab.local sees it too."
+
     def topology(self) -> dict:
         """Prod-Cluster (esx01-02), Lab-Cluster (esx03), and esx04 as a disconnected standalone host."""
         hosts = {h["name"]: dict(h) for h in self.data["hosts"]}
@@ -465,7 +478,9 @@ class DemoSolarWinds:
 
 # --- VNX: a fake Control Station, so the real parser runs on realistic naviseccli output -----------
 
-def _vnx_output() -> str:
+def _vnx_output(extra: dict | None = None) -> str:
+    """naviseccli output for the demo array, plus LUNs created on it through KasTec (extra)."""
+    extra = extra or {"luns": [], "pairs": {}}
     def lun(n, name, uid_tail, gb, pool, thin="Yes", private="No", state="Ready", faulted="false"):
         return (f"LOGICAL UNIT NUMBER {n}\nName:  {name}\nUID:  60:06:01:60:AB:CD:12:00:{uid_tail}\n"
                 f"Current Owner:  SP {'AB'[n % 2]}\nUser Capacity (GBs):  {gb:.3f}\n"
@@ -483,6 +498,9 @@ def _vnx_output() -> str:
         (7, "FILE_LUN_1", "11:22:33:44:55:66:77:08", 2000, "Pool 1"),
     ]
     lun_text = "".join(lun(*x) for x in luns) + lun(8, "Reserved LUN Pool 1", "11:22:33:44:55:66:77:09", 100, "Pool 0", private="Yes")
+    lun_text += "".join(lun(n, name, f"11:22:33:44:55:66:{n:02X}:{n:02X}", gb, pool, thin="Yes" if thin else "No")
+                        for n, name, gb, pool, thin in extra["luns"])
+    pair = lambda group: "".join(f"    {h}               {a}\n" for h, a in extra["pairs"].get(group, []))  # noqa: E731
     pools = (
         "Pool Name:  Pool 0\nPool ID:  0\nRaid Type:  r_5\nPercent Full Threshold:  70\nDisk Type:  Mixed\nState:  Ready\n"
         "Status:  OK(0x0)\nUser Capacity (GBs):  12000.000\nConsumed Capacity (GBs):  8930.250\n"
@@ -499,7 +517,8 @@ def _vnx_output() -> str:
         "  20:00:00:25:B5:00:00:01:21:00:00:25:B5:00:00:01   SP A         0\nHost name:             esx01.lab.local\n"
         "  20:00:00:25:B5:00:00:02:21:00:00:25:B5:00:00:02   SP B         0\nHost name:             esx02.lab.local\n\n"
         "HLU/ALU Pairs:\n\n  HLU Number     ALU Number\n  ----------     ----------\n"
-        "    0               0\n    1               1\n    2               2\n    3               3\nShareable:             YES\n\n"
+        "    0               0\n    1               1\n    2               2\n    3               3\n" + pair("ESX-Prod-Cluster") +
+        "Shareable:             YES\n\n"
         "Storage Group Name:    ~filestorage\nStorage Group UID:     AA:BB:CC:02\nHBA/SP Pairs:\n\n"
         "HLU/ALU Pairs:\n\n  HLU Number     ALU Number\n  ----------     ----------\n"
         "    16              6\n    17              7\nShareable:             YES\n\n")
@@ -515,8 +534,10 @@ def _vnx_output() -> str:
 class DemoVNX:
     def __init__(self, conn_id: str, config: dict):
         from .vnx import VNXConnector
+        with _lock:
+            self.extra = _state.setdefault(f"vnx-{conn_id}", {"luns": [], "pairs": {}})
         self.inner = VNXConnector({"host": "vnx-cs.demo", "username": "nasadmin", "host_key": "SHA256:demo"}, "",
-                                  runner=lambda script, key: (0, _vnx_output(), ""))
+                                  runner=lambda script, key: (0, _vnx_output(self.extra), ""))
 
     def __enter__(self):
         return self
@@ -532,3 +553,30 @@ class DemoVNX:
 
     def summary(self) -> dict:
         return self.inner.summary()
+
+    def read(self) -> dict:
+        return self.inner.read()
+
+    def create_lun(self, name: str, pool: str, size_gb: int, thin: bool, sp: str) -> dict:
+        with _lock:
+            number = 9 + len(self.extra["luns"])
+            self.extra["luns"].append((number, name, int(size_gb), pool, thin))
+        return next(lun for lun in self.read()["luns"] if lun["name"] == name)
+
+    def run_command(self, command: str) -> dict:
+        from .vnx import split_sections
+        sec = split_sections(_vnx_output(self.extra))
+        if "getagent" in command:
+            return {"output": sec["getagent"], "exit_code": 0}
+        if "lun -list" in command:
+            return {"output": sec["luns"], "exit_code": 0}
+        if "getreason" in command:
+            return {"output": sec["slots"], "exit_code": 0}
+        return {"output": f"(demo) There's no real Control Station, so this wasn't run: {command}\n"
+                          "Try naviseccli -h spa getagent, naviseccli -h spa lun -list or getreason.\n", "exit_code": 0}
+
+    def add_to_group(self, group: str, hlu: int, alu: int) -> None:
+        if group != "ESX-Prod-Cluster":
+            raise ConnectorError(f"The demo array has no storage group {group}")
+        with _lock:
+            self.extra["pairs"].setdefault(group, []).append((int(hlu), int(alu)))

@@ -1171,13 +1171,164 @@ const LUN_USE = {
 const CLEANUP = new Set(["not_presented", "datastore_empty"]);
 const vnxGb = (v) => (v == null ? "–" : fmtBytes(v * 1024 ** 3));
 
+// The Create LUN form: fill in, review the checks and exact commands, type the name, create.
+async function openCreateLun(conn, onDone) {
+  modal('<h2>Create a LUN</h2><p class="muted">Reading the array and vCenter…</p>', true);
+  let opt;
+  try { opt = await api("GET", `/api/vnx/${conn.id}/provision/options`); }
+  catch (err) { modal(`<h2>Create a LUN</h2><div class="notice bad">${esc(err.message)}</div><div class="modal-actions"><button class="btn" data-close>Close</button></div>`, true); return; }
+  const short = (h) => String(h).split(".")[0].toLowerCase();
+  const vcOptions = opt.vcenters.map((v) => `<option value="${esc(v.id)}">${esc(v.name)}${v.demo ? " (demo)" : ""}</option>`).join("");
+  modal(`<h2>Create a LUN on ${esc(conn.name)}</h2>
+    <p class="muted" style="margin-top:0">${esc(opt.array.model)} ${esc(opt.array.serial)}. Nothing is created until you review it and confirm.</p>
+    <div id="pv-step1"><form id="pv-form" class="form" autocomplete="off">
+      <label>LUN name <input name="name" required maxlength="63" placeholder="JFK_VNX_NEWAPP" spellcheck="false"></label>
+      <label>Size (GB) <input name="size_gb" type="number" min="1" max="65536" required placeholder="500"></label>
+      <label>Storage pool <select name="pool">${opt.pools.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}: ${fmtNum(Math.round(p.free_gb || 0))} GB free of ${fmtNum(Math.round(p.user_gb || 0))} (${p.percent_full ?? "?"}% full)</option>`).join("")}</select></label>
+      <label>Type <select name="thin"><option value="1">Thin: uses pool space as data is written</option><option value="0">Thick: reserves the full size now</option></select></label>
+      <label>Owner SP <select name="sp"><option value="auto">Automatic (the SP with fewer LUNs)</option><option value="a">SP A</option><option value="b">SP B</option></select></label>
+      <label>HLU <input name="hlu" type="number" min="0" max="255" placeholder="automatic: lowest free in all groups"></label>
+      <div class="full"><b>Present it to</b> <span class="muted">(the storage groups holding the ESXi hosts that should see it)</span>
+        <div class="pv-groups">${opt.storage_groups.map((g) => `<label class="inline"><input type="checkbox" name="sg" value="${esc(g.name)}">
+          <span><b>${esc(g.name)}</b> <span class="muted">${g.hosts.length ? esc(g.hosts.join(", ")) : "no hosts listed"} · ${g.luns} LUNs</span></span></label>`).join("") || '<span class="muted">This array has no host storage groups.</span>'}</div></div>
+      <label class="inline full"><input type="checkbox" name="mkds" ${opt.vcenters.length ? "checked" : "disabled"}> Also create a vSphere datastore on it${opt.vcenters.length ? "" : " (add your vCenter on the Connections page first)"}</label>
+      <div class="full form pv-ds" id="pv-ds">
+        <label>vCenter <select name="vc">${vcOptions}</select></label>
+        <label>Cluster <select name="cluster"></select></label>
+        <label>Datastore name <input name="ds_name" maxlength="80" placeholder="same as the LUN name" spellcheck="false"></label>
+        <label>VMFS version <select name="vmfs"><option value="auto">Automatic (VMFS-6, or 5 if a host runs ESXi 6.0)</option><option value="5">VMFS-5</option><option value="6">VMFS-6</option></select></label>
+      </div>
+      ${opt.errors.length ? `<div class="full">${errorsNotice(opt.errors)}</div>` : ""}
+      <div class="full" id="pv-msg"></div>
+      <div class="full modal-actions"><button type="button" class="btn" data-close>Cancel</button><button type="submit" class="btn primary">Review</button></div>
+    </form></div>
+    <div id="pv-step2" class="hidden"></div>`, true);
+
+  const form = $("#pv-form");
+  const vc = () => opt.vcenters.find((v) => v.id === form.vc.value);
+  const fillClusters = () => {
+    form.cluster.innerHTML = (vc()?.clusters || []).map((c) => `<option value="${esc(c.name)}">${esc(c.name)} (${c.hosts.length} host${c.hosts.length === 1 ? "" : "s"})</option>`).join("");
+    pickGroups();
+  };
+  const pickGroups = () => {  // tick the storage groups that hold this cluster's hosts
+    const cl = vc()?.clusters.find((c) => c.name === form.cluster.value);
+    if (!cl) return;
+    const hosts = new Set(cl.hosts.map(short));
+    form.querySelectorAll("[name=sg]").forEach((cb) => {
+      const g = opt.storage_groups.find((x) => x.name === cb.value);
+      cb.checked = g.hosts.some((h) => hosts.has(short(h)));
+    });
+  };
+  const toggleDs = () => $("#pv-ds").classList.toggle("hidden", !form.mkds.checked);
+  form.vc && (form.vc.onchange = fillClusters);
+  form.cluster.onchange = pickGroups;
+  form.mkds.onchange = toggleDs;
+  if (opt.vcenters.length) fillClusters();
+  toggleDs();
+
+  const body = () => ({
+    name: form.name.value.trim(), size_gb: Number(form.size_gb.value), pool: form.pool.value, thin: form.thin.value === "1",
+    sp: form.sp.value, hlu: form.hlu.value === "" ? null : Number(form.hlu.value),
+    storage_groups: [...form.querySelectorAll("[name=sg]:checked")].map((cb) => cb.value),
+    datastore: form.mkds.checked && vc() ? { connection_id: vc().id, cluster: form.cluster.value,
+      name: form.ds_name.value.trim() || form.name.value.trim(), vmfs: form.vmfs.value } : null,
+  });
+
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const btn = form.querySelector("[type=submit]");
+    btn.disabled = true; $("#pv-msg").innerHTML = '<p class="muted">Checking against the array and vCenter…</p>';
+    let p;
+    try { p = await api("POST", `/api/vnx/${conn.id}/provision/plan`, body()); }
+    catch (err) { $("#pv-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; btn.disabled = false; return; }
+    btn.disabled = false; $("#pv-msg").innerHTML = "";
+    const b = body();
+    $("#pv-step1").classList.add("hidden");
+    $("#pv-step2").classList.remove("hidden");
+    $("#pv-step2").innerHTML = `
+      ${p.errors.map((m) => `<div class="notice bad" style="margin-bottom:8px">${esc(m)}</div>`).join("")}
+      ${p.warnings.map((m) => `<div class="notice warn" style="margin-bottom:8px">${esc(m)}</div>`).join("")}
+      <dl class="pv-summary">
+        <dt>LUN</dt><dd><b>${esc(p.lun.name)}</b>, ${fmtNum(p.lun.size_gb)} GB ${p.lun.thin ? "thin" : "thick"} in ${esc(p.lun.pool || "?")}, owned by SP ${esc((p.lun.sp || "").toUpperCase())}</dd>
+        <dt>Presented to</dt><dd>${p.storage_groups.length ? `${p.storage_groups.map(esc).join(", ")} as HLU ${p.hlu}` : '<span class="muted">no storage group</span>'}</dd>
+        <dt>Datastore</dt><dd>${p.datastore ? `<b>${esc(p.datastore.name)}</b> in ${esc(p.datastore.cluster)} on ${esc(p.datastore.vcenter)}, VMFS ${p.datastore.vmfs === "auto" ? "automatic" : esc(p.datastore.vmfs)}` : '<span class="muted">none (create it in vSphere yourself)</span>'}</dd>
+      </dl>
+      <p style="margin-bottom:4px"><b>What KasTec will run</b></p>
+      <pre class="pv-steps">${p.steps.map(esc).join("\n")}</pre>
+      <p class="muted small-note">Only new things are created; existing LUNs, storage groups and datastores keep everything they have. Each step is recorded in the activity log.</p>
+      ${p.ok ? `<label><span>Type the LUN name <b>${esc(p.lun.name)}</b> to confirm</span> <input id="pv-confirm" autocomplete="off" spellcheck="false"></label>` : ""}
+      <div id="pv-result"></div>
+      <div class="modal-actions"><button class="btn" id="pv-back">Back</button>
+        ${p.ok ? '<button class="btn danger" id="pv-go" disabled>Create</button>' : ""}</div>`;
+    $("#pv-back").onclick = () => { $("#pv-step2").classList.add("hidden"); $("#pv-step1").classList.remove("hidden"); };
+    if (!p.ok) return;
+    const go = $("#pv-go"), confirmBox = $("#pv-confirm");
+    confirmBox.oninput = () => { go.disabled = confirmBox.value.trim() !== p.lun.name; };
+    confirmBox.focus();
+    go.onclick = async () => {
+      go.disabled = true; $("#pv-back").disabled = true; confirmBox.disabled = true;
+      $("#pv-result").innerHTML = `<p class="muted">Creating… ${b.datastore ? "the datastore step rescans the hosts and can take several minutes." : ""}</p>`;
+      let r;
+      try { r = await api("POST", `/api/vnx/${conn.id}/provision`, { ...b, confirm: confirmBox.value.trim() }); }
+      catch (err) { $("#pv-result").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; $("#pv-back").disabled = false; return; }
+      $("#pv-result").innerHTML = `<div class="pv-done">${r.steps.map((s) => `<div class="row" style="gap:8px;align-items:flex-start;margin:6px 0">
+          <span class="badge ${s.ok ? "ok" : "bad"}">${s.ok ? "Done" : "Failed"}</span><div><b>${esc(s.title)}</b><div class="sub muted">${esc(s.detail)}</div></div></div>`).join("")}</div>
+        ${r.note ? `<div class="notice warn" style="margin-top:8px">${esc(r.note)}</div>` : ""}
+        ${r.ok ? '<div class="notice ok" style="margin-top:8px">All done.</div>' : ""}`;
+      $("#pv-step2 .modal-actions").innerHTML = '<button class="btn primary" data-close>Close</button>';
+      onDone();
+    };
+  };
+}
+
+// An administrator's own commands on the Control Station, like typing them in PuTTY.
+function vnxCommandBox(getConn) {
+  const quick = ["naviseccli -h spa getagent", "naviseccli -h spa faults -list", "naviseccli -h spa storagepool -list",
+    "nas_server -list", "nas_pool -size -all", "/nas/sbin/getreason"];
+  return {
+    html: `<div class="section" id="vnx-cmd"><h2>Control Station commands</h2>
+      <p class="muted" style="margin-top:0">Run your own commands on the Control Station, as you would in PuTTY. Each one signs in fresh
+        (no <code>cd</code> or variables kept between commands), commands that ask questions can't be answered here, and every command
+        is recorded in the activity log. Unlike the rest of this page, these <b>can</b> change the array.</p>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-bottom:8px">${quick.map((q) => `<button class="btn small" data-q="${esc(q)}">${esc(q)}</button>`).join("")}</div>
+      <div class="term"><pre id="vnx-term"></pre>
+        <div class="term-input"><span>$ </span><textarea id="vnx-in" rows="1" spellcheck="false" autocomplete="off" aria-label="Control Station command"></textarea></div></div>
+      <p class="muted small-note">Enter runs · Shift+Enter adds a line · ↑ ↓ earlier commands</p></div>`,
+    wire() {
+      const out = $("#vnx-term"), input = $("#vnx-in"), hist = [];
+      let h = 0;
+      const add = (text, cls) => { const s = document.createElement("span"); if (cls) s.className = cls; s.textContent = text; out.appendChild(s);
+        out.parentElement.scrollTop = out.parentElement.scrollHeight; };
+      const run = async (command) => {
+        const conn = getConn();
+        hist.push(command); h = hist.length;
+        add(`${conn.name}$ `, "term-prompt"); add(command + "\n");
+        input.disabled = true;
+        try {
+          const r = await api("POST", `/api/vnx/${conn.id}/run`, { command });
+          add((r.output || "") + (r.exit_code ? `(exit code ${r.exit_code})\n` : "") + "\n", r.exit_code ? "term-err" : "");
+        } catch (err) { add(err.message + "\n\n", "term-err"); }
+        input.disabled = false; input.focus();
+      };
+      input.addEventListener("keydown", (e) => {
+        const single = !input.value.includes("\n");
+        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); const c = input.value.trim(); if (c) { input.value = ""; run(c); } }
+        else if (e.key === "ArrowUp" && single && h > 0) { e.preventDefault(); input.value = hist[--h]; }
+        else if (e.key === "ArrowDown" && single && h < hist.length) { e.preventDefault(); h++; input.value = hist[h] ?? ""; }
+      });
+      $("#vnx-cmd").querySelectorAll("[data-q]").forEach((b) => b.onclick = () => run(b.dataset.q));
+    },
+  };
+}
+
 async function renderVNX() {
   loading();
   const conns = (await api("GET", "/api/connections")).filter((c) => c.kind === "vnx");
   const head = `<div class="page-head"><div><h1>Storage (VNX)</h1>
       <p class="muted" style="margin:0">Health, storage pools and LUNs from your VNX arrays, read through the Control Station
-        the same way you do in PuTTY. Each LUN is matched to its vSphere datastore and VMs. Read-only: nothing on the arrays is changed.</p></div>
-      ${conns.length ? '<button class="btn" id="vnx-refresh">Refresh</button>' : ""}</div>`;
+        the same way you do in PuTTY. Each LUN is matched to its vSphere datastore and VMs. Viewing never changes anything;
+        administrators can create new LUNs and datastores, and run their own Control Station commands.</p></div>
+      ${conns.length ? `<div class="row">${isAdmin() ? '<button class="btn primary" id="vnx-create">Create LUN…</button>' : ""}<button class="btn" id="vnx-refresh">Refresh</button></div>` : ""}</div>`;
   if (!conns.length) { view.innerHTML = head + noConnections("vnx"); return; }
   if (!conns.some((c) => c.id === state.vnx)) state.vnx = conns[0].id;
   let filter = "cleanup";
@@ -1186,6 +1337,8 @@ async function renderVNX() {
     <div class="toolbar">${connectionPicker(conns, state.vnx, "vnx-conn")}
       <button class="btn" id="vnx-csv" disabled>Download LUNs (CSV)</button></div>
     <div id="vnx-body"><p class="muted">Asking the VNX… this can take up to a minute.</p></div>`;
+  const box = isAdmin() ? vnxCommandBox(() => conns.find((c) => c.id === state.vnx)) : null;
+  if (box) { view.insertAdjacentHTML("beforeend", box.html); box.wire(); }
 
   async function load() {
     const box = $("#vnx-body");
@@ -1280,6 +1433,7 @@ async function renderVNX() {
 
   $("#vnx-conn")?.addEventListener("change", (e) => { state.vnx = e.target.value; load(); });
   $("#vnx-refresh").onclick = load;
+  $("#vnx-create")?.addEventListener("click", () => openCreateLun(conns.find((c) => c.id === state.vnx), load));
   load();
 }
 
