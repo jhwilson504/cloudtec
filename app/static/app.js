@@ -897,6 +897,277 @@ function askPassword(user) {
   });
 }
 
+// ---- vSphere network map (live) ------------------------------------------------------
+
+const fmtBits = (b) => {
+  if (b == null) return "–";
+  const u = ["bps", "kbps", "Mbps", "Gbps"];
+  let i = 0;
+  while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+  return `${b.toFixed(b >= 100 || i === 0 ? 0 : 1)} ${u[i]}`;
+};
+const NET_COLS = [["Physical switches", 20], ["Host uplinks", 270], ["Virtual switches", 520], ["Port groups", 770], ["VMs & VMkernel", 1020]];
+const NET_W = 230, NET_NODE = 34, NET_GAP = 8, NET_WIDTH = 1250;
+
+async function showNetwork(box, conn) {
+  clearInterval(state.netTimer);
+  const n = (state.net ??= { cluster: "", limit: 25, live: true });
+  box.innerHTML = '<p class="muted">Reading the network layout from vCenter… (the first time can take a minute)</p>';
+  let topo, traffic;
+  try {
+    topo = await api("GET", `/api/vsphere/${conn.id}/network${n.refresh ? "?refresh=true" : ""}`);
+    n.refresh = false;
+    traffic = await api("GET", `/api/vsphere/${conn.id}/network/traffic`).catch((err) => ({ uplinks: {}, vms: {}, error: err.message }));
+  } catch (err) {
+    box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>
+      <p class="muted small-note">The network map reads virtual switches, uplinks and traffic with VMware PowerCLI on the computer KasTec runs on.</p>`;
+    return;
+  }
+  if (!topo.clusters.includes(n.cluster)) {  // start with the cluster that has the most hosts
+    const size = (c) => topo.hosts.filter((h) => h.cluster === c).length - (c === "Standalone hosts" ? 0.5 : 0);
+    n.cluster = [...topo.clusters].sort((a, b) => size(b) - size(a))[0] || "";
+  }
+  box.innerHTML = `<div class="toolbar net-toolbar">
+      <label class="inline">Cluster <select id="net-cluster">${topo.clusters.map((c) => `<option ${c === n.cluster ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>
+      <div class="segmented" id="net-limit">${[[25, "Busiest 25 VMs"], [0, "All VMs"]].map(([v, l]) => `<button data-l="${v}" class="${n.limit === v ? "active" : ""}">${l}</button>`).join("")}</div>
+      <button class="btn" id="net-live">${n.live ? "❚❚ Pause" : "▶ Live"}</button>
+      <button class="btn" id="net-relayout" title="Read the layout from vCenter again">Reload layout</button>
+      <span class="muted" id="net-updated"></span></div>
+    <div id="net-stats" class="act-kpis"></div>
+    <div class="card net-card"><div class="net-legend">
+        <span><svg width="34" height="10"><line x1="2" y1="5" x2="30" y2="5" class="lane in" marker-end="url(#net-arrow-in)"/></svg>Inbound (toward the VMs)</span>
+        <span><svg width="34" height="10"><line x1="30" y1="5" x2="4" y2="5" class="lane out" marker-end="url(#net-arrow-out)"/></svg>Outbound (from the VMs)</span>
+        <span class="muted">Thicker and faster = more traffic · dashed red = link down · hover anything for details</span></div>
+      <div class="net-scroll"><div class="net-wrap" id="net-wrap"></div></div></div>
+    <div class="section"><h2>Busiest links right now</h2><div id="net-table"></div></div>
+    ${traffic.error ? `<div class="notice warn">Traffic couldn't be read: ${esc(traffic.error)}</div>` : ""}`;
+  $("#net-cluster").onchange = (e) => { n.cluster = e.target.value; draw(); };
+  box.querySelectorAll("#net-limit button").forEach((b) => b.onclick = () => { n.limit = Number(b.dataset.l);
+    box.querySelectorAll("#net-limit button").forEach((x) => x.classList.toggle("active", x === b)); draw(); });
+  $("#net-live").onclick = () => { n.live = !n.live; $("#net-live").textContent = n.live ? "❚❚ Pause" : "▶ Live"; $("#net-wrap").classList.toggle("paused", !n.live); };
+  $("#net-relayout").onclick = () => { n.refresh = true; showNetwork(box, conn); };
+
+  let model;
+  const draw = () => { model = netModel(topo, traffic, n); netRender($("#net-wrap"), model); netStats(model, topo); netTable(model); stamp(); };
+  const stamp = () => { $("#net-updated").textContent = traffic.at ? `Traffic at ${new Date(traffic.at * 1000).toLocaleTimeString()} · updates every 20 s` : ""; };
+  draw();
+  $("#net-wrap").classList.toggle("paused", !n.live);
+  state.netTimer = setInterval(async () => {
+    if (!location.hash.startsWith("#/vsphere") || state.vsTab !== "network" || !document.body.contains(box)) { clearInterval(state.netTimer); return; }
+    if (!n.live) return;
+    try {
+      traffic = await api("GET", `/api/vsphere/${conn.id}/network/traffic`);
+      netApplyTraffic(model, traffic); netUpdate($("#net-wrap"), model); netStats(model, topo); netTable(model); stamp();
+    } catch { /* keep the last picture; the next tick tries again */ }
+  }, 20000);
+}
+
+// Which nodes and links to draw for one cluster, and the traffic on each link.
+function netModel(topo, traffic, n) {
+  const c = n.cluster;
+  const hosts = new Set(topo.hosts.filter((h) => h.cluster === c).map((h) => h.name));
+  const uplinks = topo.uplinks.filter((u) => hosts.has(u.host));
+  const switches = topo.switches.filter((s) => (s.kind === "standard" ? s.cluster === c : s.hosts.some((h) => hosts.has(h))))
+    .sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "standard" ? -1 : 1));
+  const swOrder = new Map(switches.map((s, i) => [s.id, i]));
+  const pgs = topo.portgroups.filter((p) => swOrder.has(p.switch) && (!p.id.startsWith("std:") || p.id.startsWith(`std:${c}|`)))
+    .sort((a, b) => swOrder.get(a.switch) - swOrder.get(b.switch) || a.name.localeCompare(b.name));
+  const pgOrder = new Map(pgs.map((p, i) => [p.id, i]));
+  const rate = (v) => traffic.vms[v.name] || null;
+  let vms = topo.vms.filter((v) => v.cluster === c && v.nics.some((x) => pgOrder.has(x.portgroup)));
+  const busy = (v) => { const r = rate(v); return r ? r.rx + r.tx : -1; };
+  let hidden = [];
+  if (n.limit && vms.length > n.limit) {
+    const keep = new Set([...vms].sort((a, b) => busy(b) - busy(a)).slice(0, n.limit).map((v) => v.name));
+    hidden = vms.filter((v) => !keep.has(v.name));
+    vms = vms.filter((v) => keep.has(v.name));
+  }
+  const vmks = topo.vmks.filter((k) => hosts.has(k.host) && pgOrder.has(k.portgroup));
+  const firstPg = (v) => Math.min(...v.nics.map((x) => pgOrder.get(x.portgroup) ?? 1e9));
+  const ends = [
+    ...vmks.map((k) => ({ id: k.id, kind: "vmk", label: `${k.host.split(".")[0]} · ${k.name}`, sub: [k.ip, ...k.services].filter(Boolean).join(" · "), item: k, order: pgOrder.get(k.portgroup) - 0.5 })),
+    ...vms.map((v) => ({ id: v.id, kind: "vm", label: v.name, sub: v.host ? v.host.split(".")[0] : "", item: v, order: firstPg(v), off: v.power !== "poweredOn" })),
+  ];
+  // VMs left out by the busiest-N limit: one "+N more" node per port group.
+  const more = new Map();
+  for (const v of hidden) for (const x of v.nics) if (pgOrder.has(x.portgroup)) {
+    const m = more.get(x.portgroup) || { id: `more:${x.portgroup}`, kind: "more", vms: [] };
+    m.vms.push(v); more.set(x.portgroup, m);
+  }
+  for (const [pg, m] of more) ends.push({ ...m, label: `+${m.vms.length} more VM${m.vms.length === 1 ? "" : "s"}`, sub: "quieter VMs", order: pgOrder.get(pg) + 0.9, pg });
+  ends.sort((a, b) => a.order - b.order || a.label.localeCompare(b.label));
+
+  const upOrder = (u) => (swOrder.get(u.switch) ?? 99) * 1000 + [...hosts].indexOf(u.host) * 10;
+  uplinks.sort((a, b) => upOrder(a) - upOrder(b) || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const physIds = [...new Set(uplinks.map((u) => `phys:${u.physical || "unknown"}`))];
+  const physical = physIds.map((id) => topo.physical.find((p) => p.id === id)).filter(Boolean);
+
+  const nodes = [
+    physical.map((p) => ({ id: p.id, col: 0, kind: "phys", label: p.name, sub: p.known ? `${p.ports.filter((x) => hosts.has(x.split("|")[0])).length} uplinks` : "CDP/LLDP not reported", item: p })),
+    uplinks.map((u) => ({ id: `up:${u.id}`, col: 1, kind: "uplink", label: `${u.host.split(".")[0]} · ${u.name}`, sub: u.speed ? `${u.speed >= 1000 ? u.speed / 1000 + " Gb" : u.speed + " Mb"}${u.port ? ` · ${u.port}` : ""}` : "link down", item: u, down: !u.speed })),
+    switches.map((s) => ({ id: s.id, col: 2, kind: "switch", label: s.name, sub: `${s.kind === "distributed" ? "distributed" : "standard"} · ${s.hosts.filter((h) => hosts.has(h)).length} host${s.hosts.length === 1 ? "" : "s"}`, item: s })),
+    pgs.map((p) => ({ id: p.id, col: 3, kind: "pg", label: p.name, sub: `VLAN ${p.vlan === "0" ? "none" : p.vlan}`, item: p })),
+    ends.map((e) => ({ ...e, col: 4 })),
+  ];
+  const edges = [];
+  for (const u of uplinks) {
+    edges.push({ key: `p|${u.id}`, from: `phys:${u.physical || "unknown"}`, to: `up:${u.id}`, uplink: u.id, down: !u.speed });
+    if (u.switch && swOrder.has(u.switch)) edges.push({ key: `s|${u.id}`, from: `up:${u.id}`, to: u.switch, uplink: u.id, down: !u.speed });
+  }
+  for (const p of pgs) edges.push({ key: `g|${p.id}`, from: p.switch, to: p.id, pg: p.id });
+  for (const e of ends) {
+    if (e.kind === "vmk") edges.push({ key: `k|${e.id}`, from: e.item.portgroup, to: e.id });
+    else if (e.kind === "more") edges.push({ key: `m|${e.id}`, from: e.pg, to: e.id, vms: e.vms, pgOf: e.pg });
+    else for (const x of e.item.nics) if (pgOrder.has(x.portgroup)) edges.push({ key: `v|${e.id}|${x.portgroup}`, from: x.portgroup, to: e.id, vm: e.item, share: 1 / e.item.nics.length, unplugged: !x.connected });
+  }
+  const model = { nodes, edges, hosts, allVms: [...vms, ...hidden], pgs };
+  netApplyTraffic(model, traffic);
+  return model;
+}
+
+function netApplyTraffic(model, traffic) {
+  model.traffic = traffic;
+  const vmRate = (v, share = 1) => { const r = traffic.vms[v.name]; return r ? { rx: r.rx * share, tx: r.tx * share } : { rx: 0, tx: 0 }; };
+  const pgSum = {};
+  for (const v of model.allVms) for (const x of v.nics) {
+    const r = vmRate(v, 1 / v.nics.length);
+    const s = (pgSum[x.portgroup] ||= { rx: 0, tx: 0 }); s.rx += r.rx; s.tx += r.tx;
+  }
+  for (const e of model.edges) {
+    if (e.uplink) e.rate = traffic.uplinks[e.uplink] || { rx: 0, tx: 0 };
+    else if (e.pg) e.rate = pgSum[e.pg] || { rx: 0, tx: 0 };
+    else if (e.vm) e.rate = vmRate(e.vm, e.share);
+    else if (e.vms) e.rate = e.vms.reduce((a, v) => { const r = vmRate(v, 1 / v.nics.length); return { rx: a.rx + r.rx, tx: a.tx + r.tx }; }, { rx: 0, tx: 0 });
+    else e.rate = null;
+  }
+}
+
+// Line width and animation speed grow with the rate (on a log scale, so 1 Mbps and 1 Gbps both read).
+const laneStyle = (bps) => {
+  if (!bps || bps < 1000) return { w: 0, dur: 0 };
+  const l = Math.log10(bps);
+  return { w: Math.min(6, Math.max(1.2, (l - 2.5) * 0.9)), dur: Math.max(0.35, 3.2 - (l - 3) * 0.45) };
+};
+
+function netRender(wrap, model) {
+  // Lay out from the right: VMs stacked in order, then each node level with the middle of what it connects to
+  // (pushed down just enough not to overlap), so paths run across with few crossings.
+  const pos = {}, step = NET_NODE + NET_GAP, top = 40;
+  const links = {};
+  for (const e of model.edges) { (links[e.from] ||= []).push(e.to); (links[e.to] ||= []).push(e.from); }
+  const place = (ci, desired) => {
+    let y = top - step;
+    model.nodes[ci].map((nd, i) => ({ nd, d: desired(nd, i) })).sort((a, b) => a.d - b.d).forEach(({ nd, d }) => {
+      y = Math.max(d, y + step);
+      pos[nd.id] = { x: NET_COLS[ci][1], y, nd };
+    });
+  };
+  const mid = (nd, fallback) => {
+    const ys = (links[nd.id] || []).map((id) => pos[id]?.y).filter((y) => y != null);
+    return ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : fallback;
+  };
+  place(4, (nd, i) => top + i * step);
+  for (const ci of [3, 2, 1, 0]) place(ci, (nd, i) => mid(nd, top + i * step));
+  const H = Math.max(260, ...Object.values(pos).map((p) => p.y + NET_NODE)) + 20;
+  const curve = (a, b, dy) => {
+    const x1 = a.x + NET_W, y1 = a.y + NET_NODE / 2 + dy, x2 = b.x, y2 = b.y + NET_NODE / 2 + dy, m = (x1 + x2) / 2;
+    return [`M${x1},${y1} C${m},${y1} ${m},${y2} ${x2},${y2}`, `M${x2},${y2} C${m},${y2} ${m},${y1} ${x1},${y1}`];
+  };
+  let edges = "";
+  model.edges.forEach((e, i) => {
+    const a = pos[e.from], b = pos[e.to];
+    if (!a || !b) return;
+    const [fwd] = curve(a, b, -2), [, back] = curve(a, b, 2);
+    const cls = e.down ? "down" : e.unplugged ? "unplugged" : "";
+    edges += `<g class="edge ${cls}" data-i="${i}" data-from="${esc(e.from)}" data-to="${esc(e.to)}">
+      <path class="base" d="${curve(a, b, 0)[0]}"/>
+      ${e.rate ? `<path class="lane in" d="${fwd}" marker-end="url(#net-arrow-in)"/><path class="lane out" d="${back}" marker-end="url(#net-arrow-out)"/>` : ""}
+      <path class="hit" d="${curve(a, b, 0)[0]}"/></g>`;
+  });
+  const nodes = Object.values(pos).map(({ x, y, nd }) => `<g class="node ${nd.kind}${nd.down ? " down" : ""}${nd.off ? " off" : ""}" data-id="${esc(nd.id)}" transform="translate(${x},${y})">
+      <rect width="${NET_W}" height="${NET_NODE}" rx="8"/><rect class="tag" width="4" height="${NET_NODE - 12}" x="6" y="6" rx="2"/>
+      <text x="16" y="14" class="t">${esc(nd.label.length > 30 ? nd.label.slice(0, 29) + "…" : nd.label)}</text>
+      <text x="16" y="27" class="s">${esc((nd.sub || "").slice(0, 36))}</text></g>`).join("");
+  const heads = NET_COLS.map(([t, x]) => `<text class="colhead" x="${x}" y="20">${t}</text>`).join("");
+  wrap.innerHTML = `<svg viewBox="0 0 ${NET_WIDTH} ${H}" width="100%" class="net-svg" role="img" aria-label="Network topology with live traffic">
+    <defs><marker id="net-arrow-in" viewBox="0 0 6 6" refX="5" refY="3" markerUnits="userSpaceOnUse" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="arrow in"/></marker>
+      <marker id="net-arrow-out" viewBox="0 0 6 6" refX="5" refY="3" markerUnits="userSpaceOnUse" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="arrow out"/></marker></defs>
+    ${heads}<g class="edges">${edges}</g><g class="nodes">${nodes}</g></svg><div class="act-tip net-tip hidden"></div>`;
+  netUpdate(wrap, model);
+  wireNetwork(wrap, model, pos);
+}
+
+function netUpdate(wrap, model) {
+  wrap.querySelectorAll(".edge").forEach((g) => {
+    const e = model.edges[g.dataset.i];
+    if (!e?.rate) return;
+    for (const [dir, bps] of [["in", e.rate.rx], ["out", e.rate.tx]]) {
+      const lane = g.querySelector(`.lane.${dir}`), st = laneStyle(bps);
+      lane.style.strokeWidth = st.w;
+      lane.style.animationDuration = `${st.dur}s`;
+      lane.classList.toggle("idle", !st.w);
+    }
+  });
+}
+
+function wireNetwork(wrap, model, pos) {
+  const tip = wrap.querySelector(".net-tip"), svg = wrap.querySelector("svg");
+  const show = (html, evt) => {
+    tip.innerHTML = html; tip.classList.remove("hidden");
+    const b = wrap.getBoundingClientRect();
+    tip.style.left = `${Math.min(evt.clientX - b.left + 14, b.width - 260)}px`;
+    tip.style.top = `${evt.clientY - b.top + 14}px`;
+  };
+  const hide = () => { tip.classList.add("hidden"); svg.classList.remove("focus"); svg.querySelectorAll(".lit").forEach((x) => x.classList.remove("lit")); };
+  const rateLine = (r) => (r ? `<div><span class="lane-key in"></span>In<span>${fmtBits(r.rx)}</span></div><div><span class="lane-key out"></span>Out<span>${fmtBits(r.tx)}</span></div>` : "");
+  svg.querySelectorAll(".node").forEach((g) => {
+    g.addEventListener("mousemove", (evt) => {
+      const nd = pos[g.dataset.id].nd, it = nd.item || {};
+      svg.classList.add("focus"); g.classList.add("lit");
+      svg.querySelectorAll(".edge").forEach((eg) => { if (eg.dataset.from === nd.id || eg.dataset.to === nd.id) { eg.classList.add("lit");
+        svg.querySelector(`.node[data-id="${CSS.escape(eg.dataset.from === nd.id ? eg.dataset.to : eg.dataset.from)}"]`)?.classList.add("lit"); } });
+      const r = nd.kind === "uplink" ? model.traffic.uplinks[it.id] : nd.kind === "vm" ? model.traffic.vms[it.name] : null;
+      const lines = ({
+        phys: () => [it.known ? "Physical switch, as reported by the hosts' CDP/LLDP" : "These uplinks don't report their switch (CDP/LLDP off)"],
+        uplink: () => [`Host ${it.host}`, it.speed ? `Link ${it.speed} Mb/s` : "Link down", it.physical ? `Switch ${it.physical}${it.port ? ` port ${it.port}` : ""}` : "", it.mac ? `MAC ${it.mac}` : ""],
+        switch: () => [it.kind === "distributed" ? "Distributed switch" : "Standard vSwitch", `Hosts: ${it.hosts.map((h) => h.split(".")[0]).join(", ")}`],
+        pg: () => [`VLAN ${it.vlan === "0" ? "none (native)" : it.vlan}`],
+        vm: () => [`Host ${it.host || "?"}`, it.power === "poweredOn" ? "Powered on" : "Powered off", ...it.nics.map((x, k) => `NIC ${k + 1}: ${x.connected ? "connected" : "not connected"}${x.mac ? ` · ${x.mac}` : ""}`)],
+        vmk: () => [`Host ${it.host}`, it.ip ? `IP ${it.ip}` : "", it.services?.length ? `Used for ${it.services.join(", ")}` : ""],
+        more: () => [`${nd.vms?.length} quieter VMs: ${nd.vms?.slice(0, 8).map((v) => v.name).join(", ")}${nd.vms?.length > 8 ? "…" : ""}`],
+      }[nd.kind] || (() => []))();
+      show(`<b>${esc(nd.label)}</b>${lines.filter(Boolean).map((l) => `<div class="muted">${esc(l)}</div>`).join("")}${rateLine(r)}`, evt);
+    });
+    g.addEventListener("mouseleave", hide);
+  });
+  svg.querySelectorAll(".edge .hit").forEach((h) => {
+    h.addEventListener("mousemove", (evt) => {
+      const g = h.parentNode, e = model.edges[g.dataset.i];
+      svg.classList.add("focus"); g.classList.add("lit");
+      const name = (id) => pos[id]?.nd.label || id;
+      show(`<b>${esc(name(e.from))} ↔ ${esc(name(e.to))}</b>${e.down ? '<div class="muted">Link down</div>' : ""}${e.unplugged ? '<div class="muted">VM NIC not connected</div>' : ""}${rateLine(e.rate)}`, evt);
+    });
+    h.addEventListener("mouseleave", hide);
+  });
+}
+
+function netStats(model, topo) {
+  const ups = model.edges.filter((e) => e.key.startsWith("s|") || (e.key.startsWith("p|") && !model.edges.some((x) => x.key === `s|${e.uplink}`)));
+  const rx = ups.reduce((a, e) => a + (e.rate?.rx || 0), 0), tx = ups.reduce((a, e) => a + (e.rate?.tx || 0), 0);
+  const uplinkNodes = model.nodes[1], down = uplinkNodes.filter((u) => u.down).length;
+  const kpi = (v, l, s = "") => `<div class="card act-kpi"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s muted small-note" style="margin:0">${s}</div>` : ""}</div>`;
+  $("#net-stats").innerHTML = kpi(model.hosts.size, "Hosts") + kpi(uplinkNodes.length, "Uplinks", down ? `${down} link${down === 1 ? "" : "s"} down` : "all links up")
+    + kpi(model.nodes[2].length, "Virtual switches") + kpi(model.pgs.length, "Port groups")
+    + kpi(fmtBits(rx), "Inbound now", "into the hosts") + kpi(fmtBits(tx), "Outbound now", "out of the hosts");
+}
+
+function netTable(model) {
+  const pos = Object.fromEntries(model.nodes.flat().map((n) => [n.id, n]));
+  const rows = model.edges.filter((e) => e.rate && (e.rate.rx || e.rate.tx)).sort((a, b) => (b.rate.rx + b.rate.tx) - (a.rate.rx + a.rate.tx)).slice(0, 15);
+  $("#net-table").innerHTML = table(["From", "To", "Inbound", "Outbound"], rows.map((e) => `<tr><td>${esc(pos[e.from]?.label || e.from)}</td>
+    <td>${esc(pos[e.to]?.label || e.to)}</td><td>${fmtBits(e.rate.rx)}</td><td>${fmtBits(e.rate.tx)}</td></tr>`), "No traffic reported yet.");
+}
+
 // ---- vSphere -------------------------------------------------------------
 
 async function renderVSphere() {
@@ -905,7 +1176,7 @@ async function renderVSphere() {
   if (!conns.length) { view.innerHTML = `<div class="page-head"><h1>vSphere</h1></div>${noConnections("vsphere")}`; return; }
   if (!conns.some((c) => c.id === state.vs)) state.vs = conns[0].id;
 
-  const tabs = [["topology", "Topology"], ["vms", "Virtual machines"], ["hosts", "Hosts"], ["datastores", "Datastores"], ["clusters", "Clusters"]];
+  const tabs = [["topology", "Topology"], ["network", "Network"], ["vms", "Virtual machines"], ["hosts", "Hosts"], ["datastores", "Datastores"], ["clusters", "Clusters"]];
   const topo = state.vsTab === "topology";
   view.innerHTML = `<div class="page-head"><div><h1>vSphere</h1></div></div>
     <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${state.vsTab === k ? "active" : ""}">${l}</button>`).join("")}</div>
@@ -926,6 +1197,10 @@ async function renderVSphere() {
   async function load() {
     const q = $("#vs-q")?.value.trim() ?? "";
     const box = $("#vs-results");
+    if (state.vsTab === "network") {
+      await showNetwork(box, conns.find((c) => c.id === state.vs));
+      return;
+    }
     if (topo) {
       box.innerHTML = '<p class="muted">Reading the whole inventory from vCenter…</p>';
       try {
@@ -2958,6 +3233,7 @@ async function route() {
     return;
   }
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === name));
+  view.dataset.page = routes[name] ? name : "dashboard";  // lets a page have its own styles (e.g. the bolder dashboard)
   try {
     await (routes[name] ?? renderDashboard)(arg);
   } catch (err) {

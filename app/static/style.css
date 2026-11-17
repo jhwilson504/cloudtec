@@ -394,3 +394,61 @@ body.popout .term { height: calc(100vh - 150px); }
 .dash-sub { margin: 20px 0 12px; font-size: 16px; }
 .act-rank li.conn { grid-template-columns: 78px 1fr auto; }
 .act-rank li.conn .kind { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+
+/* The Dashboard page uses heavier text throughout. */
+#view[data-page="dashboard"] { font-weight: 500; }
+#view[data-page="dashboard"] h1 { font-weight: 800; font-size: 24px; }
+#view[data-page="dashboard"] h2, #view[data-page="dashboard"] h3, #view[data-page="dashboard"] b { font-weight: 750; }
+#view[data-page="dashboard"] .act-kpi .v { font-weight: 800; }
+#view[data-page="dashboard"] .act-kpi .l { font-weight: 650; color: var(--text); }
+#view[data-page="dashboard"] .act-kpi .s, #view[data-page="dashboard"] .muted { font-weight: 550; }
+#view[data-page="dashboard"] .act-delta { font-weight: 750; }
+#view[data-page="dashboard"] .act-rank .who, #view[data-page="dashboard"] dt { font-weight: 600; }
+#view[data-page="dashboard"] .act-rank .val, #view[data-page="dashboard"] dd { font-weight: 750; }
+#view[data-page="dashboard"] .badge { font-weight: 700; }
+#view[data-page="dashboard"] .act-gauge .num { font-weight: 800; }
+#view[data-page="dashboard"] .segmented button { font-weight: 600; }
+#view[data-page="dashboard"] .axis { font-weight: 600; }
+
+/* vSphere network map. Inbound/outbound colours validated for colour-blind separation in each theme. */
+:root { --net-in: #2a7fb8; --net-out: #e0a526; }
+:root[data-theme="dark"] { --net-in: #3d8ccb; --net-out: #b5841f; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --net-in: #3d8ccb; --net-out: #b5841f; } }
+.net-toolbar { flex-wrap: wrap; gap: 10px; align-items: center; }
+.net-card { padding: 12px 14px; margin-bottom: 14px; }
+.net-legend { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; font-size: 13px; margin-bottom: 6px; }
+.net-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.net-legend .lane { stroke-width: 2.5; stroke-dasharray: 3 5; }
+.net-scroll { overflow-x: auto; }
+.net-wrap { position: relative; width: 100%; min-width: 1050px; }
+.net-svg { width: 100%; height: auto; }
+.net-svg { display: block; font-family: inherit; }
+.net-svg .colhead { font-size: 11px; font-weight: 700; fill: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+.net-svg .base { fill: none; stroke: var(--border); stroke-width: 1.5; }
+.net-svg .edge.down .base { stroke: var(--bad); stroke-dasharray: 5 4; stroke-width: 2; }
+.net-svg .edge.unplugged .base { stroke-dasharray: 2 4; }
+.net-svg .lane, .net-legend .lane { fill: none; stroke-linecap: round; stroke-dasharray: 3 9; animation: netflow 1.5s linear infinite; }
+.net-svg .lane.in, .net-legend .lane.in { stroke: var(--net-in); } .net-svg .lane.out, .net-legend .lane.out { stroke: var(--net-out); }
+.net-svg .lane.idle { stroke-width: 0 !important; display: none; }
+.net-svg .arrow.in, .net-legend .arrow.in { fill: var(--net-in); } .net-svg .arrow.out, .net-legend .arrow.out { fill: var(--net-out); }
+@keyframes netflow { to { stroke-dashoffset: -24; } }
+.net-wrap.paused .lane { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .net-svg .lane, .net-legend .lane { animation: none; stroke-dasharray: none; } }
+.net-svg .hit { fill: none; stroke: transparent; stroke-width: 12; cursor: pointer; }
+.net-svg .node { cursor: default; }
+.net-svg .node rect:first-child { fill: var(--panel); stroke: var(--border); }
+.net-svg .node .tag { fill: var(--accent); }
+.net-svg .node.vm .tag, .net-svg .node.more .tag { fill: var(--muted); }
+.net-svg .node.phys .tag { fill: var(--text); }
+.net-svg .node .t { font-size: 12px; font-weight: 600; fill: var(--text); }
+.net-svg .node .s { font-size: 10.5px; fill: var(--muted); }
+.net-svg .node.down rect:first-child { stroke: var(--bad); stroke-dasharray: 4 3; }
+.net-svg .node.down .tag { fill: var(--bad); }
+.net-svg .node.off { opacity: .55; }
+.net-svg.focus .edge:not(.lit) { opacity: .12; }
+.net-svg.focus .node:not(.lit) { opacity: .35; }
+.net-svg .node.lit rect:first-child { stroke: var(--accent); stroke-width: 1.5; }
+.net-tip { position: absolute; min-width: 220px; max-width: 320px; }
+.net-tip .muted { display: block; margin-top: 2px; }
+.lane-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; }
+.lane-key.in { background: var(--net-in); } .lane-key.out { background: var(--net-out); }

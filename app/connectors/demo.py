@@ -308,6 +308,77 @@ class DemoVSphere:
                          {"id": "network-12", "name": "VM Network", "type": "STANDARD_PORTGROUP"}],
         }]}
 
+    def network_raw(self) -> dict:
+        """The network layout in the same shape KasTec's PowerCLI script returns."""
+        placement = {}
+        topo = self.topology()["datacenters"][0]
+        for cl in topo["clusters"]:
+            for h in cl["hosts"]:
+                for v in h["vms"]:
+                    placement[v["name"]] = (h["name"], cl["name"], v["power_state"])
+        for h in topo["standalone_hosts"]:
+            for v in h["vms"]:
+                placement[v["name"]] = (h["name"], None, v["power_state"])
+        hosts = []
+        for i, (name, cluster) in enumerate([("esx01.lab.local", "Prod-Cluster"), ("esx02.lab.local", "Prod-Cluster"),
+                                             ("esx03.lab.local", "Lab-Cluster"), ("esx04.lab.local", None)], 1):
+            prod = cluster == "Prod-Cluster"
+            pnics = [{"name": f"vmnic{n}", "speed": 0 if (i == 2 and n == 3) or i == 4 else (10000 if n >= 2 else 1000),
+                      "mac": f"00:50:56:0{i}:00:0{n}", "switch": None if i == 4 else f"SW-CORE-0{1 + n % 2}",
+                      "port": None if i == 4 else f"Gi1/0/{i * 4 + n}"} for n in range(4 if prod else 2)]
+            hosts.append({
+                "name": name, "cluster": cluster, "state": "disconnected" if i == 4 else "connected", "version": "8.0.3",
+                "pnics": pnics,
+                "vswitches": [{"name": "vSwitch0", "pnics": ["vmnic0", "vmnic1"]}],
+                "portgroups": [{"name": "Management Network", "vlan": "10", "vswitch": "vSwitch0"},
+                               {"name": "VM Network", "vlan": "20", "vswitch": "vSwitch0"}],
+                "proxies": [{"name": "dvs-Prod", "pnics": ["vmnic2", "vmnic3"]}] if prod else [],
+                "vmks": [{"name": "vmk0", "ip": f"10.0.10.{10 + i}", "portgroup": "Management Network", "services": ["management"]}]
+                + ([{"name": "vmk1", "ip": f"10.0.40.{10 + i}", "dvportgroup": "dvportgroup-23", "services": ["vmotion"]}] if prod else []),
+            })
+        dvpgs = [{"key": "dvportgroup-20", "name": "dvs-Prod-Uplinks", "switch": "dvs-Prod", "vlan": "0-4094", "uplink": True},
+                 {"key": "dvportgroup-21", "name": "Servers-VLAN20", "switch": "dvs-Prod", "vlan": "20", "uplink": False},
+                 {"key": "dvportgroup-22", "name": "Users-VLAN30", "switch": "dvs-Prod", "vlan": "30", "uplink": False},
+                 {"key": "dvportgroup-23", "name": "vMotion-VLAN40", "switch": "dvs-Prod", "vlan": "40", "uplink": False}]
+        vms = []
+        for v in self.data["vms"]:
+            host, cluster, power = placement.get(v["name"], (None, None, v["power_state"]))
+            if cluster == "Prod-Cluster":
+                nics = [{"dvportgroup": "dvportgroup-21" if not v["name"].startswith("SRV-PRINT") else "dvportgroup-22",
+                         "connected": power == "POWERED_ON"}]
+                if v["name"].startswith("SRV-SQL"):
+                    nics.append({"dvportgroup": "dvportgroup-22", "connected": power == "POWERED_ON"})
+            else:
+                nics = [{"network": "VM Network", "connected": power == "POWERED_ON"}]
+            vms.append({"name": v["name"], "host": host, "power": {"POWERED_ON": "poweredOn"}.get(power, "poweredOff"), "nics": nics})
+        return {"vcenter": "vcenter.lab.local", "hosts": hosts, "dvportgroups": dvpgs, "vms": vms}
+
+    def network_traffic(self, now: float | None = None) -> dict:
+        """Made-up traffic that rises and falls over a few minutes, so the live diagram has something to show."""
+        import math
+        import time as _time
+        t = (now or _time.time()) / 40
+        raw = self.network_raw()
+        vms = {}
+        for i, v in enumerate(raw["vms"]):
+            if v["power"] != "poweredOn":
+                continue
+            base = (8 if v["name"].startswith(("SRV-SQL", "SRV-FILE")) else 2 if v["name"].startswith("SRV") else 0.4) * 1e6
+            wave = 1 + 0.7 * math.sin(t + i * 1.3)
+            vms[v["name"]] = {"rx": base * wave, "tx": base * (1.6 - 0.6 * wave) * (2.5 if "WEB" in v["name"] else 1)}
+        uplinks = {}
+        for h in raw["hosts"]:
+            if h["state"] != "connected":
+                continue
+            mine = [vms[v["name"]] for v in raw["vms"] if v["host"] == h["name"] and v["name"] in vms]
+            rx, tx = sum(x["rx"] for x in mine), sum(x["tx"] for x in mine)
+            for n, p in enumerate(h["pnics"]):
+                if not p["speed"]:
+                    continue
+                share = 0.45 if n >= 2 else 0.05
+                uplinks[f"{h['name']}|{p['name']}"] = {"rx": rx * share + 2e5, "tx": tx * share + 1e5}
+        return {"uplinks": uplinks, "vms": vms, "at": now or _time.time()}
+
     def power(self, vm_id: str, action: str) -> None:
         v = self._vm(vm_id)
         if action not in POWER_ACTIONS | GUEST_ACTIONS:

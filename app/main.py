@@ -27,7 +27,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
-from . import activity, metrics, provision
+from . import activity, metrics, netmap, provision
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -220,6 +220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     audit_lock = threading.Lock()
     local_addresses = this_computer_addresses()
     exe = find_powershell(settings.powershell)
+    netmaps = netmap.NetMaps(exe)
     shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
     watcher = certwatch.Watcher(settings)
 
@@ -908,6 +909,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def vs_topology(conn_id: str):
         with open_connector(get_conn(conn_id, "vsphere")) as c:
             return c.topology()
+
+    @app.get("/api/vsphere/{conn_id}/network", dependencies=api)
+    def vsphere_network(conn_id: str, refresh: bool = False):
+        """How hosts, physical and virtual switches, port groups and VMs connect (read with PowerCLI)."""
+        conn = get_conn(conn_id, "vsphere")
+        try:
+            if conn.demo:
+                with open_connector(conn) as c:
+                    return netmap.build(c.network_raw())
+            return netmaps.topology(conn, force=refresh)
+        except netmap.NetMapError as e:
+            raise HTTPException(502, str(e)) from e
+
+    @app.get("/api/vsphere/{conn_id}/network/traffic", dependencies=api)
+    def vsphere_network_traffic(conn_id: str):
+        """Received/transmitted bits per second on each physical NIC and powered-on VM, from vCenter's real-time stats."""
+        conn = get_conn(conn_id, "vsphere")
+        try:
+            if conn.demo:
+                with open_connector(conn) as c:
+                    return c.network_traffic()
+            return netmaps.traffic(conn)
+        except netmap.NetMapError as e:
+            raise HTTPException(502, str(e)) from e
 
     @app.get("/api/vsphere/{conn_id}/hosts", dependencies=api)
     def vs_hosts(conn_id: str):
