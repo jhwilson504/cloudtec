@@ -1433,6 +1433,318 @@ async function renderVNX() {
   load();
 }
 
+// ---- employee activity -----------------------------------------------------------
+
+const ACT_LABELS = [["productive", "Productive"], ["neutral", "Neutral"], ["unproductive", "Unproductive"], ["undefined", "Undefined"]];
+const ACT_BADGE = { productive: "act-productive", neutral: "act-neutral", unproductive: "act-unproductive", undefined: "plain" };
+const hrs = (s) => { const m = Math.round((s || 0) / 60); return m < 60 ? `${m} m` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, "0")} m`; };
+const pctText = (v) => (v == null ? "–" : `${v}%`);
+
+function actLabelBadge(label) {
+  const name = (ACT_LABELS.find(([k]) => k === label) || [, label])[1];
+  return `<span class="badge ${ACT_BADGE[label] || "plain"}"><span class="act-dot ${label}"></span>${esc(name)}</span>`;
+}
+
+// A trend chip: arrow and sign carry the direction; green/red say whether that direction is good.
+function actDelta(value, goodWhenUp, unit = "") {
+  if (value == null || value === 0) return value === 0 ? '<span class="act-delta flat">±0</span>' : "";
+  const up = value > 0, good = up === goodWhenUp;
+  return `<span class="act-delta ${good ? "good" : "bad"}" title="Change from the previous period">${up ? `▲ +${value}` : `▼ −${Math.abs(value)}`}${unit}</span>`;
+}
+
+// The AI-usage ring: a 270° track with the share drawn over it.
+function actGauge(pct) {
+  const r = 52, c = 2 * Math.PI * r, arc = c * 0.75, val = Math.max(0, Math.min(100, pct || 0)) / 100 * arc;
+  return `<svg viewBox="0 0 140 130" class="act-gauge" role="img" aria-label="AI tools: ${pctText(pct)} of active time">
+    <circle cx="70" cy="70" r="${r}" class="track" stroke-dasharray="${arc} ${c}" transform="rotate(135 70 70)"/>
+    <circle cx="70" cy="70" r="${r}" class="value" stroke-dasharray="${val} ${c}" transform="rotate(135 70 70)"/>
+    <text x="70" y="78" text-anchor="middle" class="num">${pct == null ? "–" : pct + "%"}</text></svg>`;
+}
+
+// Stacked 100% bars: one per day (or hour), the share of active time in each label, with a hover tooltip.
+function actTimeline(timeline, period) {
+  const W = 760, H = 230, L = 38, B = 26, T = 8, plotH = H - B - T, n = timeline.length;
+  const slot = (W - L) / n, bw = Math.max(4, Math.min(28, slot - 2));
+  const fmtKey = (k) => (period === "day" ? k.slice(0, 2) : new Date(k + "T12:00").toLocaleDateString(undefined, { day: "numeric", month: "short" }));
+  const every = Math.ceil(n / 12);
+  let bars = "";
+  timeline.forEach((b, i) => {
+    const x = L + i * slot + (slot - bw) / 2;
+    if (b.active) {
+      let y = T + plotH;
+      ACT_LABELS.forEach(([k], li) => {
+        const h = b[k] / b.active * plotH;
+        if (h <= 0) return;
+        y -= h;
+        const top = !ACT_LABELS.slice(li + 1).some(([k2]) => b[k2] > 0);
+        bars += top ? `<path class="seg ${k}" d="M${x},${y + h} V${y + 3} q0,-3 3,-3 H${x + bw - 3} q3,0 3,3 V${y + h} Z"/>`
+          : `<rect class="seg ${k}" x="${x}" y="${y}" width="${bw}" height="${Math.max(0, h - 2)}"/>`;
+      });
+    }
+    bars += `<rect class="hit" x="${L + i * slot}" y="${T}" width="${slot}" height="${plotH}" data-i="${i}"/>`;
+    if (i % every === 0) bars += `<text class="axis" x="${x + bw / 2}" y="${H - 8}" text-anchor="middle">${esc(fmtKey(b.key))}</text>`;
+  });
+  const grid = [0, 25, 50, 75, 100].map((p) => { const y = T + plotH - p / 100 * plotH;
+    return `<line class="grid" x1="${L}" x2="${W}" y1="${y}" y2="${y}"/><text class="axis" x="${L - 6}" y="${y + 4}" text-anchor="end">${p}%</text>`; }).join("");
+  return `<div class="act-legend">${ACT_LABELS.map(([k, l]) => `<span><span class="act-dot ${k}"></span>${l}</span>`).join("")}</div>
+    <div class="act-chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="Share of active time per ${period === "day" ? "hour" : "day"}">${grid}${bars}</svg>
+    <div class="act-tip hidden"></div></div>`;
+}
+
+function wireTimeline(box, timeline, period) {
+  const tip = box.querySelector(".act-tip"), svg = box.querySelector("svg");
+  box.querySelectorAll(".hit").forEach((r) => {
+    r.addEventListener("mouseenter", () => {
+      const b = timeline[r.dataset.i];
+      const when = period === "day" ? `${b.key}–${String(Number(b.key.slice(0, 2)) + 1).padStart(2, "0")}:00`
+        : new Date(b.key + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+      tip.innerHTML = `<b>${esc(when)}</b>${b.active ? ACT_LABELS.map(([k, l]) => `<div><span class="act-dot ${k}"></span>${l}<span>${Math.round(b[k] / b.active * 100)}% · ${hrs(b[k])}</span></div>`).join("")
+        : '<div class="muted">No activity</div>'}`;
+      tip.classList.remove("hidden");
+      const box2 = svg.getBoundingClientRect(), rr = r.getBoundingClientRect();
+      tip.style.left = `${Math.min(rr.left - box2.left + rr.width + 6, box2.width - 200)}px`;
+      r.classList.add("on");
+    });
+    r.addEventListener("mouseleave", () => { tip.classList.add("hidden"); r.classList.remove("on"); });
+  });
+}
+
+function actRanking(title, rows, render, empty) {
+  return `<div class="card act-rank"><h3>${title}</h3>${rows.length ? `<ol>${rows.map(render).join("")}</ol>` : `<p class="muted">${empty}</p>`}</div>`;
+}
+
+async function renderActivity() {
+  loading();
+  const a = (state.act ??= { tab: "dashboard", period: "month", date: new Date().toISOString().slice(0, 10), user: "", scheduled: true });
+  const tabs = [["dashboard", "Dashboard"], ["live", "Live"], ["attendance", "Time & attendance"], ["apps", "Apps & websites"], ["settings", "Settings"]];
+  view.innerHTML = `<div class="page-head"><div><h1>Employee activity</h1>
+      <p class="muted" style="margin:0">Time & attendance and the apps and websites in use, reported by the KasTec agent on monitored PCs.
+        No keystrokes, window contents or screenshots are recorded.</p></div></div>
+    <div class="tabs">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${a.tab === k ? "active" : ""}">${l}</button>`).join("")}</div>
+    <div id="act-body"></div>`;
+  view.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { a.tab = b.dataset.tab; renderActivity(); });
+  clearInterval(state.actTimer);
+  const body = $("#act-body");
+  await ({ dashboard: actDashboard, live: actLive, attendance: actAttendance, apps: actApps, settings: actSettings }[a.tab])(body, a);
+}
+
+function actFilters(a, { user = true, scheduled = true } = {}) {
+  return `<div class="toolbar act-filters">
+    <div class="segmented" id="act-period">${["day", "week", "month"].map((p) => `<button data-p="${p}" class="${a.period === p ? "active" : ""}">${p[0].toUpperCase() + p.slice(1)}</button>`).join("")}</div>
+    <div class="row act-datenav"><button class="btn small" id="act-prev" aria-label="Previous">‹</button><span id="act-when" class="act-when"></span><button class="btn small" id="act-next" aria-label="Next">›</button></div>
+    ${user ? '<select id="act-user"><option value="">All employees</option></select>' : ""}
+    ${scheduled ? `<label class="inline"><input type="checkbox" id="act-sched" ${a.scheduled ? "checked" : ""}> Scheduled hours only</label>` : ""}
+    <button class="btn small" id="act-refresh" title="Refresh">⟳</button></div>`;
+}
+
+function wireFilters(box, a, reload, people) {
+  box.querySelectorAll("#act-period button").forEach((b) => b.onclick = () => { a.period = b.dataset.p; reload(); });
+  const shift = (dir) => {
+    const d = new Date(a.date + "T12:00");
+    if (a.period === "day") d.setDate(d.getDate() + dir);
+    else if (a.period === "week") d.setDate(d.getDate() + 7 * dir);
+    else { d.setDate(1); d.setMonth(d.getMonth() + dir); }
+    a.date = d.toISOString().slice(0, 10); reload();
+  };
+  $("#act-prev").onclick = () => shift(-1);
+  $("#act-next").onclick = () => shift(1);
+  $("#act-refresh").onclick = reload;
+  const sel = $("#act-user");
+  if (sel && people) {
+    sel.innerHTML += people.map((p) => `<option value="${esc(p.user)}" ${a.user === p.user ? "selected" : ""}>${esc(p.name)}</option>`).join("");
+    sel.onchange = () => { a.user = sel.value; reload(); };
+  }
+  const sc = $("#act-sched");
+  if (sc) sc.onchange = () => { a.scheduled = sc.checked; reload(); };
+}
+
+// The first and last day of the period around a date, like the server works it out.
+function actBounds(period, date) {
+  const d = new Date(date + "T12:00"), iso = (x) => x.toISOString().slice(0, 10);
+  if (period === "day") return [date, date];
+  if (period === "week") { const m = new Date(d); m.setDate(d.getDate() - ((d.getDay() + 6) % 7)); const e = new Date(m); e.setDate(m.getDate() + 6); return [iso(m), iso(e)]; }
+  const f = new Date(d.getFullYear(), d.getMonth(), 1, 12), l = new Date(d.getFullYear(), d.getMonth() + 1, 0, 12);
+  return [iso(f), iso(l)];
+}
+
+function actWhen(period, from, to) {
+  const d = (s, o) => new Date(s + "T12:00").toLocaleDateString(undefined, o);
+  if (period === "day") return d(from, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  if (period === "week") return `${d(from, { day: "numeric", month: "short" })} – ${d(to, { day: "numeric", month: "short", year: "numeric" })}`;
+  return d(from, { month: "long", year: "numeric" });
+}
+
+async function actDashboard(box, a) {
+  const [s, people] = await Promise.all([
+    api("GET", `/api/activity/summary?period=${a.period}&date=${a.date}&user=${encodeURIComponent(a.user)}&scheduled=${a.scheduled}`),
+    api("GET", "/api/activity/people")]);
+  const k = s.kpis, dl = s.deltas;
+  const kpi = (value, label, delta) => `<div class="card act-kpi"><div class="v">${value}${delta}</div><div class="l">${label}</div></div>`;
+  box.innerHTML = `${actFilters(a)}
+    ${s.people ? "" : `<div class="notice" style="margin-bottom:14px">No activity recorded for this period yet. Set up monitoring on the <b>Settings</b> tab, or load demo data there to try the page.</div>`}
+    <div class="act-kpis">
+      ${kpi(pctText(k.work_related_pct), "Work-related activity", actDelta(dl.work_related_pct, true, " pts"))}
+      ${kpi(pctText(k.productive_pct), "Productive activity", actDelta(dl.productive_pct, true, " pts"))}
+      ${kpi(pctText(k.unproductive_pct), "Unproductive activity", actDelta(dl.unproductive_pct, false, " pts"))}
+      ${kpi(k.late_starts, "Late starts", actDelta(dl.late_starts, false))}
+      ${kpi(k.early_departures, "Early departures", actDelta(dl.early_departures, false))}
+    </div>
+    <div class="act-row">
+      <div class="card act-gauge-card"><h3>AI tools usage</h3>${actGauge(k.ai_pct)}
+        <p class="muted small-note" style="margin:0">Share of active time on ChatGPT, Copilot, Claude, Gemini and similar.</p>
+        <dl class="act-mini"><dt>Active</dt><dd>${hrs(k.active)}</dd><dt>Idle</dt><dd>${hrs(k.idle)}</dd><dt>People</dt><dd>${s.people}</dd></dl></div>
+      <div class="card act-timeline"><h3>Activity timeline</h3>${actTimeline(s.timeline, s.period)}</div>
+    </div>
+    <div class="act-ranks">
+      ${actRanking("Productive activity ranking", s.rankings.productive, (r, i) => `<li><span class="n">${i + 1}</span><span class="who">${esc(r.name)}</span><span class="val">${r.pct}%</span>
+          <div class="bar"><div class="productive" style="width:${r.pct}%"></div></div></li>`, "Nobody with at least 10 minutes of activity.")}
+      ${actRanking("Unproductive activity ranking", s.rankings.unproductive, (r, i) => `<li><span class="n">${i + 1}</span><span class="who">${esc(r.name)}${r.kind === "website" ? "" : ' <span class="muted">(app)</span>'}</span><span class="val">${r.pct}%</span>
+          <div class="bar"><div class="unproductive" style="width:${r.pct / (s.rankings.unproductive[0]?.pct || 1) * 100}%"></div></div></li>`, "No unproductive apps or websites. 🎉")}
+      ${actRanking("Late starts & early departures", s.rankings.events, (r, i) => `<li><span class="n">${i + 1}</span><span class="who">${esc(r.name)}</span>
+          <span class="val">${r.late ? `<span class="badge warn">${r.late} late</span>` : ""} ${r.early ? `<span class="badge plain">${r.early} early</span>` : ""}</span></li>`, "Everyone kept to the schedule.")}
+    </div>
+    <p class="muted small-note">${esc(actWhen(s.period, s.from, s.to))}${s.scheduled_only ? " · scheduled hours only" : ""}. Percentages are of active time (with keyboard or mouse input). Labels are set on the Apps & websites tab.</p>`;
+  $("#act-when").textContent = actWhen(s.period, s.from, s.to);
+  wireFilters(box, a, () => actDashboard(box, a), people);
+  wireTimeline(box.querySelector(".act-timeline"), s.timeline, s.period);
+}
+
+async function actLive(box) {
+  const draw = async () => {
+    const rows = await api("GET", "/api/activity/live");
+    const online = rows.filter((r) => r.online).length;
+    box.innerHTML = `<div class="toolbar"><span class="muted">${online} of ${rows.length} online · refreshes every 30 seconds</span></div>
+      ${table(["Person", "Status", "Using now", "Today active", "Today idle", "Productive today"], rows.map((r) => `<tr>
+        <td><b>${esc(r.name)}</b><div class="sub mono">${esc(r.computer || "")}</div></td>
+        <td>${r.online ? '<span class="badge ok">● Online</span>' : `<span class="badge plain">Last seen ${fmtDate(r.last_seen)}</span>`}</td>
+        <td>${r.now_app ? `${esc(r.now_domain || r.now_app)} ${r.now_domain ? `<span class="muted">in ${esc(r.now_app)}</span>` : ""} ${actLabelBadge(r.now_label)}` : "–"}</td>
+        <td>${hrs(r.today_active)}</td><td>${hrs(r.today_idle)}</td><td>${pctText(r.today_productive_pct)}</td></tr>`),
+        "Nobody reported in the last day. Check the agent is deployed (Settings tab).")}`;
+  };
+  await draw();
+  state.actTimer = setInterval(() => { if (location.hash.startsWith("#/activity") && state.act.tab === "live") draw().catch(() => {}); else clearInterval(state.actTimer); }, 30000);
+}
+
+async function actAttendance(box, a) {
+  const [rows, people] = await Promise.all([
+    api("GET", `/api/activity/attendance?period=${a.period}&date=${a.date}&user=${encodeURIComponent(a.user)}`),
+    api("GET", "/api/activity/people")]);
+  box.innerHTML = `${actFilters(a, { scheduled: false })}
+    <div class="toolbar"><button class="btn" id="act-att-csv" ${rows.length ? "" : "disabled"}>Download (CSV)</button></div>
+    ${table(["Date", "Person", "First activity", "Last activity", "Active", "Idle", "Schedule"], rows.slice().reverse().map((r) => `<tr>
+      <td>${esc(new Date(r.day + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }))}</td>
+      <td><b>${esc(r.name)}</b><div class="sub mono">${esc(r.computers.join(", "))}</div></td>
+      <td>${esc(r.first)}</td><td>${esc(r.last)}</td><td>${hrs(r.active)}</td><td>${hrs(r.idle)}</td>
+      <td>${r.late ? '<span class="badge warn">Late start</span> ' : ""}${r.early ? '<span class="badge plain">Left early</span>' : ""}${!r.late && !r.early ? '<span class="badge ok">On time</span>' : ""}</td></tr>`),
+      "No activity in this period.")}`;
+  $("#act-when").textContent = actWhen(a.period, ...actBounds(a.period, a.date));
+  wireFilters(box, a, () => actAttendance(box, a), people);
+  $("#act-att-csv").onclick = () => downloadCsv(`attendance-${a.period}-${a.date}.csv`,
+    ["Date", "Person", "User", "Computers", "First activity", "Last activity", "Active minutes", "Idle minutes", "Late start", "Left early"],
+    rows.map((r) => [r.day, r.name, r.user, r.computers.join("; "), r.first, r.last, Math.round(r.active / 60), Math.round(r.idle / 60), r.late ? "Yes" : "", r.early ? "Yes" : ""]));
+}
+
+async function actApps(box, a) {
+  const [rows, settings] = await Promise.all([api("GET", `/api/activity/apps?period=${a.period}&date=${a.date}`), api("GET", "/api/activity/settings")]);
+  let filter = "all";
+  box.innerHTML = `${actFilters(a, { user: false, scheduled: false })}
+    <div class="toolbar"><div class="segmented" id="act-app-filter"><button data-f="all" class="active">All ${rows.length}</button><button data-f="undefined">Not labelled (${rows.filter((r) => r.label === "undefined").length})</button><button data-f="unproductive">Unproductive</button></div>
+      <input type="search" id="act-app-q" placeholder="Find an app or website…" style="width:240px"></div>
+    <div id="act-app-list"></div>
+    <p class="muted small-note">A website's label wins over its browser's, and covers its subdomains (google.com covers mail.google.com). Changes apply to past data too.</p>`;
+  $("#act-when").textContent = actWhen(a.period, ...actBounds(a.period, a.date));
+  const draw = () => {
+    const q = ($("#act-app-q").value || "").toLowerCase();
+    const shown = rows.filter((r) => (filter === "all" || r.label === filter) && (!q || r.name.includes(q)));
+    $("#act-app-list").innerHTML = table(["App or website", "Used by", "Active time", "Label"], shown.slice(0, 300).map((r) => `<tr>
+      <td><b>${esc(r.name)}</b> ${r.kind === "website" ? `<span class="muted">website${r.via ? ` · ${esc(r.via)}` : ""}</span>` : '<span class="muted">app</span>'} ${r.ai ? '<span class="badge info">AI</span>' : ""}</td>
+      <td>${r.users} ${r.users === 1 ? "person" : "people"}</td><td>${hrs(r.active)}</td>
+      <td><select data-key="${esc(r.key)}">${ACT_LABELS.map(([k, l]) => `<option value="${k}" ${r.label === k ? "selected" : ""}>${l}</option>`).join("")}</select>
+        ${r.custom ? '<span class="muted small-note">your label</span>' : ""}</td></tr>`), "Nothing here for this period.");
+    $("#act-app-list").querySelectorAll("select[data-key]").forEach((sel) => sel.onchange = async () => {
+      const labels = { ...settings.labels, [sel.dataset.key]: sel.value };
+      try {
+        const saved = await api("PUT", "/api/activity/settings", { labels });
+        settings.labels = saved.labels;
+        rows.find((r) => r.key === sel.dataset.key).label = sel.value;
+        toast(`${sel.dataset.key.slice(4)} is now ${sel.value}`);
+      } catch (err) { toast(err.message, true); }
+    });
+  };
+  box.querySelectorAll("#act-app-filter button").forEach((b) => b.onclick = () => {
+    filter = b.dataset.f; box.querySelectorAll("#act-app-filter button").forEach((x) => x.classList.toggle("active", x === b)); draw(); });
+  $("#act-app-q").oninput = debounce(draw, 200);
+  wireFilters(box, a, () => actApps(box, a));
+  draw();
+}
+
+async function actSettings(box) {
+  const s = await api("GET", "/api/activity/settings");
+  const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+  const server = `${location.protocol}//${location.host}`;
+  box.innerHTML = `<div class="card section"><h2>Who and when</h2>
+    <form id="act-form" class="form" autocomplete="off">
+      <label class="inline full"><input type="checkbox" name="enabled" ${s.enabled ? "checked" : ""}> <b>Record activity</b> (agents record nothing while this is off)</label>
+      <label>Active Directory <select name="ad">${s.ad_connections.map((c) => `<option value="${esc(c.id)}" ${c.id === s.ad_connection_id ? "selected" : ""}>${esc(c.name)}</option>`).join("") || '<option value="">Add an AD connection first</option>'}</select></label>
+      <label>Monitored AD group <input name="group" value="${esc(s.group)}" placeholder="KasTec Monitored"></label>
+      <div class="full">${s.membership_error ? `<div class="notice bad">${esc(s.membership_error)}</div>` : `<div class="notice ok">${s.members} member${s.members === 1 ? "" : "s"} of ${esc(s.group)} will be monitored (nested groups included).</div>`}</div>
+      <label>Working day starts <input name="start" type="time" value="${esc(s.schedule.start)}"></label>
+      <label>Working day ends <input name="end" type="time" value="${esc(s.schedule.end)}"></label>
+      <div class="full"><span>Working days</span><div class="row" style="gap:14px;margin-top:4px">${days.map((d, i) => `<label class="inline"><input type="checkbox" name="day" value="${i}" ${s.schedule.days.includes(i) ? "checked" : ""}> ${d}</label>`).join("")}</div></div>
+      <label>Grace (minutes) before a late start or early departure counts <input name="grace" type="number" min="0" max="120" value="${s.schedule.grace_minutes}"></label>
+      <label>Keep activity for (days) <input name="retention" type="number" min="7" max="730" value="${s.retention_days}"></label>
+      <label class="full">Notice shown to each person on their first monitored sign-in <textarea name="notice" rows="3">${esc(s.notice)}</textarea></label>
+      <div class="full" id="act-msg"></div>
+      <div class="full"><button class="btn primary">Save</button></div>
+    </form></div>
+    <div class="card section"><h2>Deploy the agent</h2>
+      <ol class="act-steps">
+        <li>Server address the PCs will use: <input id="act-server" value="${esc(server)}" style="width:320px"> <span class="muted small-note">(the name in KasTec's certificate, e.g. https://kastec.btcbahamas.com:8443)</span></li>
+        <li><button class="btn primary" id="act-dl">Download KasTecAgent.ps1</button> It has this address and the agent key filled in.</li>
+        <li>Copy it to <code>\\\\btcbahamas.com\\NETLOGON\\KasTec\\KasTecAgent.ps1</code> (readable by Domain Users).</li>
+        <li>Create a Group Policy Object linked to the users' OU. Under <b>User Configuration → Preferences → Control Panel Settings → Scheduled Tasks</b>, add a <b>Scheduled Task (Windows 7 and later)</b>:
+          run as <code>%LogonDomain%\\%LogonUser%</code>, "Run only when user is logged on", trigger <b>At log on</b>, action
+          <code>powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "\\\\btcbahamas.com\\NETLOGON\\KasTec\\KasTecAgent.ps1"</code>.</li>
+        <li>Under the GPO's <b>Security Filtering</b>, use the same group (<b>${esc(s.group)}</b>). KasTec also checks the group, so nobody else is recorded even if the agent runs.</li>
+        <li>The PCs must trust KasTec's certificate (your company CA does) and reach it on the port above.</li>
+      </ol>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center"><span>Agent key</span>
+        <span style="display:inline-block;width:360px"><input id="act-key" type="password" value="${esc(s.agent_key)}" readonly></span>
+        <button class="btn small danger" id="act-newkey">Make a new key</button></div>
+      <p class="muted small-note">Hold the eye to see it. A new key stops agents with the old one until you deploy the new download.</p>
+    </div>
+    <div class="card section"><h2>Try it with demo data</h2>
+      <p class="muted">Fills the pages with five weeks of made-up activity for the demo AD's people (or 20 sample people), so you can see how it looks before deploying anything.</p>
+      <button class="btn" id="act-demo">Load demo data</button> ${s.demo_data ? '<button class="btn danger" id="act-demo-clear">Remove demo data</button>' : ""}
+    </div>`;
+  const f = $("#act-form");
+  f.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("PUT", "/api/activity/settings", {
+        enabled: f.enabled.checked, ad_connection_id: f.ad.value, group: f.group.value.trim(), notice: f.notice.value,
+        retention_days: Number(f.retention.value),
+        schedule: { start: f.start.value, end: f.end.value, grace_minutes: Number(f.grace.value),
+          days: [...f.querySelectorAll("[name=day]:checked")].map((c) => Number(c.value)) } });
+      toast("Saved"); actSettings(box);
+    } catch (err) { $("#act-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+  };
+  $("#act-dl").onclick = async () => {
+    try {
+      const res = await fetch(`/api/activity/agent.ps1?server=${encodeURIComponent($("#act-server").value.trim())}`);
+      if (!res.ok) throw new Error((await res.json()).detail || "Download failed");
+      const a2 = document.createElement("a");
+      a2.href = URL.createObjectURL(await res.blob()); a2.download = "KasTecAgent.ps1"; a2.click();
+    } catch (err) { toast(err.message, true); }
+  };
+  $("#act-newkey").onclick = async () => {
+    if (!(await confirmAction("New agent key", "Agents using the current key stop reporting until you download the agent again and replace it on NETLOGON.", "Make a new key", true))) return;
+    await api("POST", "/api/activity/settings/new-key"); toast("New key made"); actSettings(box);
+  };
+  $("#act-demo").onclick = async () => { $("#act-demo").disabled = true; const r = await api("POST", "/api/activity/demo"); toast(`Loaded demo activity for ${r.people} people`); actSettings(box); };
+  $("#act-demo-clear")?.addEventListener("click", async () => { await api("DELETE", "/api/activity/demo"); toast("Demo data removed"); actSettings(box); });
+}
+
 // ---- servers (iDRAC) -------------------------------------------------------
 
 const HEALTH = { OK: ["ok", "Healthy"], Warning: ["warn", "Warning"], Critical: ["bad", "Critical"] };
@@ -2525,6 +2837,7 @@ const routes = {
   servers: renderServers,
   solarwinds: renderSolarWinds,
   vnx: renderVNX,
+  activity: renderActivity,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
   powershell: renderShell,
@@ -2536,7 +2849,7 @@ const routes = {
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };
 
-const ADMIN_ROUTES = new Set(["connections", "users", "powershell"]);
+const ADMIN_ROUTES = new Set(["connections", "users", "powershell", "activity"]);
 
 async function route() {
   const [, name = "dashboard", arg] = location.hash.split("/");

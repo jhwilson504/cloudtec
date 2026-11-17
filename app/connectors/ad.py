@@ -356,6 +356,17 @@ class ADConnector:
             })
         return out
 
+    def group_member_usernames(self, group: str) -> set[str]:
+        """sAMAccountNames (lower case) of the users in a group, including through nested groups."""
+        found = self._search(f"(&{GROUP_FILTER}(|(cn={escape_filter_chars(group)})(sAMAccountName={escape_filter_chars(group)})))",
+                             ["cn"], 2, base=self.domain_dn or self.base_dn)
+        if not found:
+            raise ConnectorError(f"There's no group called {group!r} in the directory")
+        members = self._search(f"(&{USER_FILTER}(memberOf:1.2.840.113556.1.4.1941:={escape_filter_chars(found[0]['dn'])}))",
+                               ["sAMAccountName", "displayName"], 20000, base=self.domain_dn or self.base_dn)
+        self.member_names = {(_first(m, "sAMAccountName") or "").lower(): _first(m, "displayName") or "" for m in members}
+        return {u for u in self.member_names if u}
+
     def computers(self, q: str = "", limit: int = 2000) -> list[dict]:
         filt = f"(&{COMPUTER_FILTER}{_contains(['cn', 'dNSHostName', 'operatingSystem'], q)})"
         out = []

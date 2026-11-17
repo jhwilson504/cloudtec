@@ -126,6 +126,12 @@ class DemoAD:
     def groups(self, q: str = "", limit: int = 500) -> list[dict]:
         return [dict(g) for g in self.data["groups"] if _match(q, g["name"], g["description"])][:limit]
 
+    def group_member_usernames(self, group: str) -> set[str]:
+        """The demo directory's 'monitored' group: its first 24 enabled users, whatever the group is called."""
+        members = [u for u in self.data["users"] if u["enabled"]][:24]
+        self.member_names = {u["username"]: u["display_name"] for u in members}
+        return set(self.member_names)
+
     def computers(self, q: str = "", limit: int = 2000) -> list[dict]:
         return [dict(c) for c in self.data["computers"]
                 if _match(q, c["name"], c["dns_name"], c["os"])][:limit]

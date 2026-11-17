@@ -4,8 +4,10 @@ import json
 import logging
 import re
 import smtplib
+import secrets
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -25,7 +27,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
-from . import provision
+from . import activity, provision
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -148,6 +150,13 @@ class VNXCommandBody(BaseModel):
     command: str = Field(min_length=1, max_length=20_000)
 
 
+class AgentReportBody(BaseModel):
+    user: str = Field(min_length=1, max_length=200)
+    computer: str = Field(min_length=1, max_length=63)
+    agent: str = Field(default="", max_length=20)
+    samples: list[dict] = Field(default_factory=list, max_length=5000)
+
+
 class DCNameBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
@@ -205,6 +214,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     sessions = Sessions(settings.session_hours * 3600)
     throttle = LoginThrottle()
     audit_path = settings.data_dir / "audit.log"
+    activity_store = activity.ActivityStore(settings.data_dir)
     audit_lock = threading.Lock()
     local_addresses = this_computer_addresses()
     exe = find_powershell(settings.powershell)
@@ -1061,6 +1071,168 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             result = c.run_command(body.command)
             remember(conn, c)
         return result
+
+    # --- employee activity -------------------------------------------------
+
+    membership = {"at": 0.0, "key": None, "users": set(), "names": {}, "error": None}
+    membership_lock = threading.Lock()
+
+    def monitored(force: bool = False) -> tuple[set[str], dict, str | None]:
+        """Members of the monitored AD group (user names, lower case), cached for 10 minutes."""
+        s = activity_store.settings()
+        key = (s["ad_connection_id"], s["group"])
+        with membership_lock:
+            if not force and membership["key"] == key and time.time() - membership["at"] < 600:
+                return membership["users"], membership["names"], membership["error"]
+        users, names, error = set(), {}, None
+        conn = store.get(s["ad_connection_id"]) if s["ad_connection_id"] else None
+        if not conn or conn.kind != "ad":
+            error = "Choose the Active Directory connection that holds the monitored group, then click Save."
+        elif not s["group"]:
+            error = "Enter the AD group whose members are monitored."
+        else:
+            try:
+                with open_connector(conn) as c:
+                    users = c.group_member_usernames(s["group"])
+                    names = dict(getattr(c, "member_names", {}))
+            except ConnectorError as e:
+                error = str(e)
+        with membership_lock:
+            membership.update(at=time.time(), key=key, users=users, names=names, error=error)
+        if names:
+            activity_store.set_names(names)
+        return users, names, error
+
+    def agent_auth(request: Request) -> dict:
+        s = activity_store.settings()
+        given = request.headers.get("x-kastec-agent-key", "")
+        if not s["agent_key"] or not secrets.compare_digest(given.encode(), s["agent_key"].encode()):
+            raise HTTPException(401, "Wrong agent key")
+        return s
+
+    def agent_user(raw: str) -> str:
+        user = raw.strip().split("\\")[-1].split("@")[0].lower()
+        if not activity.USER.match(user):
+            raise HTTPException(422, "Invalid user name")
+        return user
+
+    def should_monitor(s: dict, user: str) -> bool:
+        if not s["enabled"]:
+            return False
+        users, _, error = monitored()
+        return not error and user in users
+
+    @app.get("/api/activity/agent/config")
+    def activity_agent_config(user: str, request: Request):
+        """The agent asks at start (and every hour) whether to record this user, and what to tell them."""
+        s = agent_auth(request)
+        return {"monitor": should_monitor(s, agent_user(user)), "notice": s["notice"], "sample_seconds": 15,
+                "upload_seconds": 300}
+
+    @app.post("/api/activity/agent/report")
+    def activity_agent_report(body: AgentReportBody, request: Request):
+        s = agent_auth(request)
+        user = agent_user(body.user)
+        computer = body.computer.strip().lower()
+        if not activity.COMPUTER.match(computer):
+            raise HTTPException(422, "Invalid computer name")
+        if not should_monitor(s, user):
+            return {"accepted": 0, "monitor": False}
+        names = monitored()[1]
+        return {"accepted": activity_store.ingest(user, computer, body.samples, name=names.get(user, "")), "monitor": True}
+
+    def activity_day(value: str | None):
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date() if value else datetime.now().date()
+        except ValueError as e:
+            raise HTTPException(422, "Dates look like 2026-11-17") from e
+
+    def activity_call(fn, *args):
+        try:
+            return fn(*args)
+        except activity.ActivityError as e:
+            raise HTTPException(422, str(e)) from e
+
+    @app.get("/api/activity/summary", dependencies=admin_only)
+    def activity_summary(period: str = "month", date: str | None = None, user: str | None = None, scheduled: bool = True):
+        return activity_call(activity.summary, activity_store, period, activity_day(date), user or None, scheduled)
+
+    @app.get("/api/activity/live", dependencies=admin_only)
+    def activity_live():
+        return activity.live(activity_store)
+
+    @app.get("/api/activity/attendance", dependencies=admin_only)
+    def activity_attendance(period: str = "week", date: str | None = None, user: str | None = None):
+        s = activity_store.settings()
+        start, end, days = activity_call(activity.period_bounds, period, activity_day(date))
+        now = datetime.now()
+        rows = activity.attendance(activity_store._rows(start, end, user or None), s["schedule"], days, now.date(),
+                                   now.hour * 60 + now.minute)
+        people = activity_store.people()
+        return [{**r, "name": people.get(r["user"], {}).get("name") or r["user"]} for r in rows]
+
+    @app.get("/api/activity/apps", dependencies=admin_only)
+    def activity_apps(period: str = "month", date: str | None = None):
+        return activity_call(activity.apps, activity_store, period, activity_day(date))
+
+    @app.get("/api/activity/people", dependencies=admin_only)
+    def activity_people():
+        return sorted(activity_store.people().values(), key=lambda p: p["name"].lower())
+
+    @app.get("/api/activity/settings", dependencies=admin_only)
+    def activity_settings():
+        s = activity_store.settings()
+        users, _, error = monitored()
+        return {**s, "members": len(users), "membership_error": error, "demo_data": activity_store.has_demo(),
+                "ad_connections": [{"id": c.id, "name": c.name} for c in store.list("ad")]}
+
+    @app.put("/api/activity/settings", dependencies=admin_only)
+    def activity_save_settings(body: dict, request: Request):
+        old = activity_store.settings()
+        new = activity_call(activity.clean_settings, body, old)
+        activity_store.save_settings(new)
+        changed = sorted(k for k in new if new[k] != old.get(k))
+        audit(request, "Employee activity: changed settings", ", ".join(changed))
+        monitored(force=True)
+        return activity_settings()
+
+    @app.post("/api/activity/settings/new-key", dependencies=admin_only)
+    def activity_new_key(request: Request):
+        activity_store.new_agent_key()
+        audit(request, "Employee activity: made a new agent key", "agents using the old key stop reporting")
+        return activity_settings()
+
+    @app.post("/api/activity/demo", dependencies=admin_only)
+    def activity_demo(request: Request):
+        names = {}
+        demo_ad = next((c for c in store.list("ad") if c.demo), None)
+        if demo_ad:
+            with open_connector(demo_ad) as c:
+                c.group_member_usernames("demo")
+                names = dict(c.member_names)
+        if not names:
+            names = {f"user{i:02d}": f"Demo User {i}" for i in range(1, 21)}
+        n = activity.load_demo(activity_store, names)
+        audit(request, "Employee activity: loaded demo data", f"{len(names)} people")
+        return {"people": len(names), "minutes": n}
+
+    @app.delete("/api/activity/demo", dependencies=admin_only)
+    def activity_clear_demo(request: Request):
+        activity_store.clear_demo()
+        audit(request, "Employee activity: removed demo data")
+        return {"ok": True}
+
+    @app.get("/api/activity/agent.ps1", dependencies=admin_only)
+    def activity_agent_script(request: Request, server: str | None = None):
+        """The agent with this server's address and the agent key filled in, ready for Group Policy."""
+        base = (server or str(request.base_url)).rstrip("/")
+        if not re.match(r"^https?://[A-Za-z0-9.-]+(:\d+)?$", base):
+            raise HTTPException(422, "The server address looks like https://kastec.btcbahamas.com:8443")
+        text = (Path(__file__).parent.parent / "agent" / "KasTecAgent.ps1").read_text(encoding="utf-8")
+        text = text.replace("__KASTEC_SERVER__", base).replace("__KASTEC_AGENT_KEY__", activity_store.settings()["agent_key"])
+        audit(request, "Employee activity: downloaded the agent", base)
+        return Response(text, media_type="text/plain; charset=utf-8",
+                        headers={"Content-Disposition": 'attachment; filename="KasTecAgent.ps1"'})
 
     # --- iDRAC -------------------------------------------------------------
 
