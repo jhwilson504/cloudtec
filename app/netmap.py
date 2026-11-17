@@ -135,7 +135,7 @@ if ($vs) {
 def _wrap(conn, body: str) -> str:
     # The error names the script line it came from (its number only: one line carries the password).
     return (f"try {{\n{_connect(conn)}{body}\n}} catch {{ 'NETMAP-ERROR|' + $_.Exception.Message + "
-            "' (network map script line ' + $_.InvocationInfo.ScriptLineNumber + ')' }}")
+            "' (network map script line ' + $_.InvocationInfo.ScriptLineNumber + ')' }")
 
 
 def _check(output: str) -> str:
