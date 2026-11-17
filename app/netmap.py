@@ -50,50 +50,64 @@ $vi = $global:KasTecNet
 
 
 TOPOLOGY = r"""
-$clusters = @{}; foreach ($c in Get-View -Server $vi -ViewType ClusterComputeResource -Property Name) { $clusters[$c.MoRef.Value] = $c.Name }
-$dvsNames = @{}; foreach ($d in Get-View -Server $vi -ViewType DistributedVirtualSwitch -Property Name, Uuid) { $dvsNames[$d.MoRef.Value] = $d.Name; $dvsNames[$d.Uuid] = $d.Name }
+# Real inventories have gaps: vSwitches with no uplinks, VMs with no host, hosts with no distributed switch.
+# K looks a key up safely (a missing key gives nothing), and L turns a value that may be missing into a list.
+function K($table, $key) { if ($null -ne $key -and $table.ContainsKey($key)) { $table[$key] } }
+function L($items) { @($items | Where-Object { $null -ne $_ }) }
+
+$clusters = @{}; foreach ($c in L (Get-View -Server $vi -ViewType ClusterComputeResource -Property Name)) { $clusters[$c.MoRef.Value] = $c.Name }
+$dvsNames = @{}
+foreach ($d in L (Get-View -Server $vi -ViewType DistributedVirtualSwitch -Property Name, Uuid)) {
+  $dvsNames[$d.MoRef.Value] = $d.Name
+  if ($d.Uuid) { $dvsNames[$d.Uuid] = $d.Name }
+}
 $dvpgs = @{}
-foreach ($p in Get-View -Server $vi -ViewType DistributedVirtualPortgroup -Property Name, Key, Config) {
+foreach ($p in L (Get-View -Server $vi -ViewType DistributedVirtualPortgroup -Property Name, Key, Config)) {
+  if (-not $p.Key) { continue }
   $vlan = $p.Config.DefaultPortConfig.Vlan
-  $vid = if ($vlan.VlanId -is [array]) { ($vlan.VlanId | ForEach-Object { "$($_.Start)-$($_.End)" }) -join ',' } else { "$($vlan.VlanId)" }
-  $dvpgs[$p.Key] = [ordered]@{ key = $p.Key; name = $p.Name; switch = $dvsNames[$p.Config.DistributedVirtualSwitch.Value]; vlan = $vid; uplink = [bool]$p.Config.Uplink }
+  $vid = if ($vlan.VlanId -is [array]) { (L $vlan.VlanId | ForEach-Object { "$($_.Start)-$($_.End)" }) -join ',' } else { "$($vlan.VlanId)" }
+  $dvpgs[$p.Key] = [ordered]@{ key = $p.Key; name = $p.Name; switch = (K $dvsNames $p.Config.DistributedVirtualSwitch.Value); vlan = $vid; uplink = [bool]$p.Config.Uplink }
 }
 $hostNames = @{}; $hosts = @()
-foreach ($h in Get-View -Server $vi -ViewType HostSystem -Property Name, Parent, Runtime.ConnectionState, Config.Product.Version, Config.Network, Config.VirtualNicManagerInfo, ConfigManager.NetworkSystem) {
+foreach ($h in L (Get-View -Server $vi -ViewType HostSystem -Property Name, Parent, Runtime.ConnectionState, Config.Product.Version, Config.Network, Config.VirtualNicManagerInfo, ConfigManager.NetworkSystem)) {
   $hostNames[$h.MoRef.Value] = $h.Name
   $net = $h.Config.Network
-  $pnicByKey = @{}; foreach ($p in $net.Pnic) { $pnicByKey[$p.Key] = $p.Device }
+  $pnicByKey = @{}; foreach ($p in L $net.Pnic) { if ($p.Key) { $pnicByKey[$p.Key] = $p.Device } }
   $hints = @{}
-  if ($h.Runtime.ConnectionState -eq 'connected') {
-    try { foreach ($hint in (Get-View -Server $vi $h.ConfigManager.NetworkSystem).QueryNetworkHint($null)) { $hints[$hint.Device] = $hint } } catch {}
+  if ("$($h.Runtime.ConnectionState)" -eq 'connected' -and $h.ConfigManager.NetworkSystem) {
+    try { foreach ($hint in L (Get-View -Server $vi $h.ConfigManager.NetworkSystem).QueryNetworkHint($null)) { if ($hint.Device) { $hints[$hint.Device] = $hint } } } catch {}
   }
   $services = @{}
-  foreach ($nc in $h.Config.VirtualNicManagerInfo.NetConfig) {
-    foreach ($sel in @($nc.SelectedVnic)) {
-      $v = $nc.CandidateVnic | Where-Object { $_.Key -eq $sel } | Select-Object -First 1
-      if ($v) { $services[$v.Device] = @($services[$v.Device]) + $nc.NicType | Where-Object { $_ } }
+  foreach ($nc in L $h.Config.VirtualNicManagerInfo.NetConfig) {
+    foreach ($sel in L $nc.SelectedVnic) {
+      $v = L $nc.CandidateVnic | Where-Object { $_.Key -eq $sel } | Select-Object -First 1
+      if ($v.Device) { $services[$v.Device] = @(L (K $services $v.Device)) + @($nc.NicType) }
     }
   }
+  $pnics = foreach ($p in L $net.Pnic) {
+    $hint = K $hints $p.Device; $sw = $null; $port = $null
+    if ($hint.ConnectedSwitchPort) { $sw = $hint.ConnectedSwitchPort.DevId; $port = $hint.ConnectedSwitchPort.PortId }
+    elseif ($hint.LldpInfo) { $sw = (L $hint.LldpInfo.Parameter | Where-Object { $_.Key -eq 'System Name' } | Select-Object -First 1).Value; $port = $hint.LldpInfo.PortId }
+    [ordered]@{ name = $p.Device; speed = $(if ($p.LinkSpeed) { $p.LinkSpeed.SpeedMb } else { 0 }); mac = $p.Mac; switch = $sw; port = $port }
+  }
   $hosts += [ordered]@{
-    name = $h.Name; cluster = $clusters[$h.Parent.Value]; state = "$($h.Runtime.ConnectionState)"; version = $h.Config.Product.Version
-    pnics = @($net.Pnic | ForEach-Object {
-      $hint = $hints[$_.Device]; $sw = $null; $port = $null
-      if ($hint.ConnectedSwitchPort) { $sw = $hint.ConnectedSwitchPort.DevId; $port = $hint.ConnectedSwitchPort.PortId }
-      elseif ($hint.LldpInfo) { $sw = ($hint.LldpInfo.Parameter | Where-Object { $_.Key -eq 'System Name' }).Value; $port = $hint.LldpInfo.PortId }
-      [ordered]@{ name = $_.Device; speed = if ($_.LinkSpeed) { $_.LinkSpeed.SpeedMb } else { 0 }; mac = $_.Mac; switch = $sw; port = $port } })
-    vswitches = @($net.Vswitch | ForEach-Object { [ordered]@{ name = $_.Name; pnics = @($_.Pnic | ForEach-Object { $pnicByKey[$_] }) } })
-    portgroups = @($net.Portgroup | ForEach-Object { [ordered]@{ name = $_.Spec.Name; vlan = "$($_.Spec.VlanId)"; vswitch = $_.Spec.VswitchName } })
-    proxies = @($net.ProxySwitch | ForEach-Object { [ordered]@{ name = $(if ($dvsNames[$_.DvsUuid]) { $dvsNames[$_.DvsUuid] } else { $_.DvsName }); pnics = @($_.Pnic | ForEach-Object { $pnicByKey[$_] }) } })
-    vmks = @($net.Vnic | ForEach-Object { [ordered]@{ name = $_.Device; ip = $_.Spec.Ip.IpAddress; portgroup = $_.Portgroup
-      dvportgroup = $_.Spec.DistributedVirtualPort.PortgroupKey; services = @($services[$_.Device]) } })
+    name = $h.Name; cluster = (K $clusters $h.Parent.Value); state = "$($h.Runtime.ConnectionState)"; version = $h.Config.Product.Version
+    pnics = @($pnics)
+    vswitches = @(foreach ($sw in L $net.Vswitch) { [ordered]@{ name = $sw.Name; pnics = @(foreach ($k in L $sw.Pnic) { K $pnicByKey $k }) } })
+    portgroups = @(foreach ($pg in L $net.Portgroup) { [ordered]@{ name = $pg.Spec.Name; vlan = "$($pg.Spec.VlanId)"; vswitch = $pg.Spec.VswitchName } })
+    proxies = @(foreach ($px in L $net.ProxySwitch) {
+      $dn = K $dvsNames $px.DvsUuid
+      [ordered]@{ name = $(if ($dn) { $dn } else { $px.DvsName }); pnics = @(foreach ($k in L $px.Pnic) { K $pnicByKey $k }) } })
+    vmks = @(foreach ($v in L $net.Vnic) { [ordered]@{ name = $v.Device; ip = $v.Spec.Ip.IpAddress; portgroup = $v.Portgroup
+      dvportgroup = $v.Spec.DistributedVirtualPort.PortgroupKey; services = @(L (K $services $v.Device)) } })
   }
 }
 $vms = @()
-foreach ($v in Get-View -Server $vi -ViewType VirtualMachine -Property Name, Runtime.Host, Runtime.PowerState, Config.Template, Config.Hardware.Device) {
+foreach ($v in L (Get-View -Server $vi -ViewType VirtualMachine -Property Name, Runtime.Host, Runtime.PowerState, Config.Template, Config.Hardware.Device)) {
   if ($v.Config.Template) { continue }
-  $vms += [ordered]@{ name = $v.Name; host = $hostNames[$v.Runtime.Host.Value]; power = "$($v.Runtime.PowerState)"
-    nics = @($v.Config.Hardware.Device | Where-Object { $_ -is [VMware.Vim.VirtualEthernetCard] } | ForEach-Object {
-      [ordered]@{ network = $_.Backing.DeviceName; dvportgroup = $_.Backing.Port.PortgroupKey; connected = [bool]$_.Connectable.Connected; mac = $_.MacAddress } }) }
+  $vms += [ordered]@{ name = $v.Name; host = (K $hostNames $v.Runtime.Host.Value); power = "$($v.Runtime.PowerState)"
+    nics = @(foreach ($n in L $v.Config.Hardware.Device) { if ($n -is [VMware.Vim.VirtualEthernetCard]) {
+      [ordered]@{ network = $n.Backing.DeviceName; dvportgroup = $n.Backing.Port.PortgroupKey; connected = [bool]$n.Connectable.Connected; mac = $n.MacAddress } } }) }
 }
 $json = [ordered]@{ vcenter = $vi.Name; hosts = $hosts; dvportgroups = @($dvpgs.Values); vms = $vms } | ConvertTo-Json -Depth 8 -Compress
 $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
@@ -119,7 +133,9 @@ if ($vs) {
 
 
 def _wrap(conn, body: str) -> str:
-    return f"try {{\n{_connect(conn)}{body}\n}} catch {{ 'NETMAP-ERROR|' + $_.Exception.Message }}"
+    # The error names the script line it came from (its number only: one line carries the password).
+    return (f"try {{\n{_connect(conn)}{body}\n}} catch {{ 'NETMAP-ERROR|' + $_.Exception.Message + "
+            "' (network map script line ' + $_.InvocationInfo.ScriptLineNumber + ')' }}")
 
 
 def _check(output: str) -> str:

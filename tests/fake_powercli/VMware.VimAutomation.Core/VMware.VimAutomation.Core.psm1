@@ -52,7 +52,7 @@ function Get-View {
             (o @{ NicType = 'vmotion'; SelectedVnic = @('v-vmk1'); CandidateVnic = @((o @{ Key = 'v-vmk1'; Device = 'vmk1' })) })) })
           Network = (o @{
             Pnic = @((& $pn 'k0' 'vmnic0' 1000), (& $pn 'k1' 'vmnic1' 0), (& $pn 'k2' 'vmnic2' 10000))
-            Vswitch = @((o @{ Name = 'vSwitch0'; Pnic = @('k0', 'k1') }))
+            Vswitch = @((o @{ Name = 'vSwitch0'; Pnic = @('k0', 'k1') }), (o @{ Name = 'vSwitch-Internal'; Pnic = $null }))
             Portgroup = @((o @{ Spec = (o @{ Name = 'Management Network'; VlanId = 10; VswitchName = 'vSwitch0' }) }),
                           (o @{ Spec = (o @{ Name = 'VCMS-Only'; VlanId = 0; VswitchName = 'vSwitch0' }) }))
             ProxySwitch = @((o @{ DvsUuid = 'uuid-1'; DvsName = 'dvs-JFK'; Pnic = @('k2') }))
@@ -72,6 +72,8 @@ function Get-View {
         Config = (o @{ Template = $false; Hardware = (o @{ Device = @($disk, $std) }) }) }
       o @{ Name = 'APP02'; Runtime = (o @{ Host = (o @{ Value = 'host-10' }); PowerState = 'poweredOff' })
         Config = (o @{ Template = $false; Hardware = (o @{ Device = @($dv) }) }) }
+      o @{ Name = '%2fvmfs%2fvolumes%2f5793c116%2fPELATROTEST_03'; Runtime = (o @{ Host = $null; PowerState = 'poweredOff' })
+        Config = $null }
       o @{ Name = 'TEMPLATE-W2022'; Runtime = (o @{ Host = (o @{ Value = 'host-10' }); PowerState = 'poweredOff' })
         Config = (o @{ Template = $true; Hardware = (o @{ Device = @() }) }) }
     }

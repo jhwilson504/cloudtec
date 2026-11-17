@@ -69,11 +69,14 @@ def test_scripts_against_fake_powercli(monkeypatch):
         assert (up["vmnic0"]["physical"], up["vmnic0"]["port"], up["vmnic0"]["speed"]) == ("SW-JFK-CORE", "Gi1/0/7", 1000)
         assert up["vmnic1"]["speed"] == 0 and up["vmnic1"]["switch"] == "std:JFK|vSwitch0"      # link down
         assert (up["vmnic2"]["physical"], up["vmnic2"]["switch"]) == ("NX-JFK-01", "dvs:dvs-JFK")  # LLDP, distributed
-        assert {s["id"] for s in m["switches"]} == {"std:JFK|vSwitch0", "dvs:dvs-JFK"}
+        # An internal-only vSwitch (no uplinks) is shown too; it caused "array index evaluated to null" before.
+        assert {s["id"] for s in m["switches"]} == {"std:JFK|vSwitch0", "std:JFK|vSwitch-Internal", "dvs:dvs-JFK"}
         pgs = {p["id"]: p for p in m["portgroups"]}
         assert pgs["dvpg:dvportgroup-5"]["vlan"] == "20" and "dvpg:dvportgroup-4" not in pgs    # uplink port group hidden
         vms = {v["name"]: v for v in m["vms"]}
         assert "TEMPLATE-W2022" not in vms
+        orphan = vms["%2fvmfs%2fvolumes%2f5793c116%2fPELATROTEST_03"]       # a VM vCenter has no host for
+        assert orphan["host"] is None and orphan["nics"] == []
         assert vms["BTCPRODDC1"]["nics"] == [{"portgroup": "std:JFK|vSwitch0|VCMS-Only", "connected": True, "mac": "00:50:56:aa:00:01"}]
         assert vms["APP02"]["nics"][0]["portgroup"] == "dvpg:dvportgroup-5" and not vms["APP02"]["nics"][0]["connected"]
         vmk = {v["name"]: v for v in m["vmks"]}
@@ -95,7 +98,7 @@ def test_wrong_password_and_missing_powercli(monkeypatch, tmp_path):
     monkeypatch.setenv("PSModulePath", f"{FAKE}{os.pathsep}{os.environ.get('PSModulePath', '')}")
     maps = netmap.NetMaps(PWSH)
     try:
-        with pytest.raises(netmap.NetMapError, match="incorrect user name or password"):
+        with pytest.raises(netmap.NetMapError, match=r"incorrect user name or password.*script line \d+"):
             maps.topology(vc("wrong"))
     finally:
         maps.close()
