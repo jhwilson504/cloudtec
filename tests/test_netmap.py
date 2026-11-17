@@ -122,3 +122,18 @@ def test_demo_network_through_the_api(tmp_path):
     assert t["vms"] and all(x["rx"] > 0 for x in t["vms"].values())
     assert set(t["uplinks"]) <= {u["id"] for u in m["uplinks"]}
     assert c.get("/api/vsphere/nope/network").status_code == 404
+
+
+@needs_pwsh
+def test_hyper_v_commands_with_the_same_names_dont_interfere(monkeypatch):
+    """A PC with Hyper-V's PowerShell tools has its own Get-VM and Get-VMHost; KasTec must call PowerCLI's."""
+    monkeypatch.setenv("PSModulePath", f"{FAKE}{os.pathsep}{os.environ.get('PSModulePath', '')}")
+    maps = netmap.NetMaps(PWSH)
+    try:
+        session = maps._session(vc())
+        session.run("function global:Get-VM { 'HYPER-V' }; function global:Get-VMHost { 'HYPER-V' }")
+        t = maps.traffic(vc())
+        assert t["vms"] == {"BTCPRODDC1": {"rx": 2_000_000.0, "tx": 400_000.0}}
+        assert "jfkvh10.btcbahamas.com|vmnic0" in t["uplinks"]
+    finally:
+        maps.close()

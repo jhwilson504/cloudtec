@@ -158,7 +158,7 @@ Set-PowerCLIConfiguration -Scope Session -InvalidCertificateAction {cert} -Parti
 $__cred = New-Object System.Management.Automation.PSCredential({ps_quote(cfg.get("username"))}, (ConvertTo-SecureString {ps_quote(vc_conn.secret)} -AsPlainText -Force))
 $vi = Connect-VIServer -Server {ps_quote(cfg["host"])} -Port {int(cfg.get("port") or 443)} -Credential $__cred -ErrorAction Stop
 try {{
-  $hosts = @(Get-Cluster -Name {ps_quote(cluster)} -Server $vi -ErrorAction Stop | Get-VMHost | Where-Object {{ $_.ConnectionState -in 'Connected', 'Maintenance' }} | Sort-Object Name)
+  $hosts = @(Get-Cluster -Name {ps_quote(cluster)} -Server $vi -ErrorAction Stop | VMware.VimAutomation.Core\Get-VMHost | Where-Object {{ $_.ConnectionState -in 'Connected', 'Maintenance' }} | Sort-Object Name)
   if (-not $hosts) {{ throw 'No connected hosts in cluster {cluster.replace("'", "''")}.' }}
   $hosts | Get-VMHostStorage -RescanAllHba | Out-Null
   $first = $hosts[0]

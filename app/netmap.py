@@ -100,14 +100,15 @@ $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 for ($i = 0; $i -lt $b64.Length; $i += 150) { 'NETMAP|' + $b64.Substring($i, [Math]::Min(150, $b64.Length - $i)) }
 """
 
+# Get-VM and Get-VMHost are named with their module: a computer with Hyper-V's PowerShell tools has its own.
 TRAFFIC = r"""
-$hs = @(Get-VMHost -Server $vi | Where-Object { $_.ConnectionState -in 'Connected', 'Maintenance' })
+$hs = @(VMware.VimAutomation.Core\Get-VMHost -Server $vi | Where-Object { $_.ConnectionState -in 'Connected', 'Maintenance' })
 if ($hs) {
   foreach ($s in Get-Stat -Server $vi -Entity $hs -Stat 'net.received.average', 'net.transmitted.average' -Realtime -MaxSamples 1 -ErrorAction SilentlyContinue) {
     if ($s.Instance) { 'P|{0}|{1}|{2}|{3}' -f $s.Entity.Name, $s.Instance, $s.MetricId, $s.Value }
   }
 }
-$vs = @(Get-VM -Server $vi | Where-Object { $_.PowerState -eq 'PoweredOn' })
+$vs = @(VMware.VimAutomation.Core\Get-VM -Server $vi | Where-Object { $_.PowerState -eq 'PoweredOn' })
 if ($vs) {
   foreach ($s in Get-Stat -Server $vi -Entity $vs -Stat 'net.received.average', 'net.transmitted.average' -Realtime -MaxSamples 1 -ErrorAction SilentlyContinue) {
     if (-not $s.Instance) { 'V|{0}|{1}|{2}' -f $s.Entity.Name, $s.MetricId, $s.Value }
