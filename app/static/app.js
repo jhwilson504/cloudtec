@@ -252,16 +252,6 @@ async function renderDashboard() {
     return;
   }
   const ok = items.filter((i) => i.summary);
-  const ad = ok.filter((i) => i.kind === "ad").map((i) => i.summary);
-  const vs = ok.filter((i) => i.kind === "vsphere").map((i) => i.summary);
-  const srv = ok.filter((i) => i.kind === "idrac").map((i) => i.summary);
-  const sw = ok.filter((i) => i.kind === "solarwinds").map((i) => i.summary);
-  const vnx = ok.filter((i) => i.kind === "vnx").map((i) => i.summary);
-  const sum = (arr, k) => arr.reduce((a, s) => a + (s[k] || 0), 0);
-  const cap = sum(vs, "capacity"), free = sum(vs, "free_space");
-
-  const stat = (label, value, sub = "") =>
-    `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
 
   const cards = items.map((i) => {
     const s = i.summary;
@@ -312,26 +302,135 @@ async function renderDashboard() {
       </div>${body}</div>`;
   }).join("");
 
+  const hist = await api("GET", `/api/dashboard/history?days=${state.dashDays ||= 30}`).catch(() => null);
+  const t = hist?.today || {}, prev = hist?.previous || null;
+  const delta = (key) => (prev && t[key] != null && prev[key] != null ? Math.round((t[key] - prev[key]) * 10) / 10 : null);
+  const kpi = (value, label, sub, dl) => `<div class="card act-kpi dash-kpi"><div class="v">${value}${dl}</div><div class="l">${label}</div>${sub ? `<div class="s">${sub}</div>` : ""}</div>`;
+  const level = t.health_pct == null ? "plain" : t.health_pct >= 95 ? "ok" : t.health_pct >= 80 ? "warn" : "bad";
+  const levelText = { ok: "Healthy", warn: "Needs attention", bad: "Problems", plain: "No data" }[level];
+
+  // What needs attention, in one list.
+  const issues = [
+    ...items.filter((i) => i.error).map((i) => ({ text: `${i.name} isn't answering`, link: "#/connections", cls: "bad" })),
+    ...(t.hosts > t.hosts_connected ? [{ text: `${t.hosts - t.hosts_connected} ESXi host${t.hosts - t.hosts_connected === 1 ? "" : "s"} not connected`, link: "#/vsphere", cls: "bad" }] : []),
+    ...(t.sw_down ? [{ text: `${t.sw_down} SolarWinds node${t.sw_down === 1 ? "" : "s"} down`, link: "#/solarwinds", cls: "bad" }] : []),
+    ...(t.vnx_faults ? [{ text: `${t.vnx_faults} VNX fault${t.vnx_faults === 1 ? "" : "s"}`, link: "#/vnx", cls: "bad" }] : []),
+    ...(t.servers_attention ? [{ text: `${t.servers_attention} server${t.servers_attention === 1 ? "" : "s"} need attention (iDRAC)`, link: "#/servers", cls: "warn" }] : []),
+    ...(t.locked ? [{ text: `${t.locked} locked-out account${t.locked === 1 ? "" : "s"}`, link: "#/reset", cls: "warn" }] : []),
+    ...(t.sw_alerts ? [{ text: `${t.sw_alerts} active SolarWinds alert${t.sw_alerts === 1 ? "" : "s"}`, link: "#/solarwinds", cls: "plain" }] : []),
+  ];
+
   view.innerHTML = `${banner}<div class="page-head"><div><h1>Dashboard</h1>
-      <p class="muted">${items.length} connection${items.length === 1 ? "" : "s"} · ${items.length - ok.length} with problems</p></div>
+      <p class="muted" style="margin:0">${items.length} connection${items.length === 1 ? "" : "s"} · ${items.length === ok.length ? "all answering" : `${items.length - ok.length} not answering`}${hist?.previous_day ? ` · changes since ${esc(new Date(hist.previous_day + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }))}` : ""}</p></div>
       <button class="btn" id="refresh">Refresh</button></div>
-    <div class="stats">
-      ${stat("Users", fmtNum(sum(ad, "users")), `${fmtNum(sum(ad, "disabled"))} disabled`)}
-      ${stat("Locked out", fmtNum(sum(ad, "locked")), "need unlocking")}
-      ${stat("AD computers", fmtNum(sum(ad, "computers")))}
-      ${stat("Virtual machines", fmtNum(sum(vs, "vms")), `${fmtNum(sum(vs, "powered_on"))} powered on`)}
-      ${stat("ESXi hosts", fmtNum(sum(vs, "hosts")), `${fmtNum(sum(vs, "hosts_connected"))} connected`)}
-      ${stat("Storage free", fmtBytes(free), cap ? `${(free / cap * 100).toFixed(0)}% of ${fmtBytes(cap)}` : "")}
-      ${srv.length ? stat("Physical servers", fmtNum(sum(srv, "servers")), `${fmtNum(sum(srv, "attention"))} need attention`) : ""}
-      ${vnx.length ? stat("VNX pool free", fmtBytes(sum(vnx, "free_gb") * 1024 ** 3), `of ${fmtBytes(sum(vnx, "capacity_gb") * 1024 ** 3)} · ${fmtNum(sum(vnx, "faults"))} faults`) : ""}
-      ${sw.length ? stat("Monitored nodes", fmtNum(sum(sw, "nodes")), `${fmtNum(sum(sw, "down"))} down · ${fmtNum(sum(sw, "alerts"))} alerts`) : ""}
+    <div class="act-kpis">
+      ${kpi(fmtNum(t.users), "Users", `${fmtNum(t.disabled)} disabled`, actDelta(delta("users"), null))}
+      ${kpi(fmtNum(t.locked), "Locked out", "need unlocking", actDelta(delta("locked"), false))}
+      ${kpi(`${fmtNum(t.vms_on)}<span class="of">/ ${fmtNum(t.vms)}</span>`, "VMs powered on", "", actDelta(delta("vms_on"), null))}
+      ${kpi(`${fmtNum(t.hosts_connected)}<span class="of">/ ${fmtNum(t.hosts)}</span>`, "ESXi hosts connected", "", actDelta(delta("hosts_connected"), true))}
+      ${kpi(fmtBytes(t.storage_free), "vSphere storage free", t.storage_used_pct == null ? "" : `${t.storage_used_pct}% used`, actDelta(delta("storage_used_pct"), false, " pts used"))}
+      ${kpi(fmtNum(t.problems), "Problems", "need attention", actDelta(delta("problems"), false))}
     </div>
+    <div class="act-row">
+      <div class="card act-gauge-card"><h3>Infrastructure health</h3>${dashGauge(t.health_pct, level)}
+        <p style="text-align:center;margin:0 0 6px"><span class="badge ${level}">${levelText}</span></p>
+        <dl class="act-mini">${(t.health_parts || []).map((p) => `<dt>${esc(p.label)}</dt><dd>${p.pct}%</dd>`).join("")}</dl></div>
+      <div class="card dash-trend"><div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+          <h3 style="margin:0">Trend</h3>
+          <div class="row" style="gap:8px;flex-wrap:wrap"><div class="segmented" id="dash-metric">${DASH_METRICS.map(([k, l]) => `<button data-m="${k}" class="${(state.dashMetric ||= "storage_used_pct") === k ? "active" : ""}">${l}</button>`).join("")}</div>
+          <div class="segmented" id="dash-days">${[7, 30, 90].map((n) => `<button data-d="${n}" class="${state.dashDays === n ? "active" : ""}">${n} days</button>`).join("")}</div></div></div>
+        <div id="dash-chart"></div></div>
+    </div>
+    <div class="act-ranks">
+      <div class="card act-rank"><h3>Fullest datastores</h3><div id="dash-ds"><p class="muted">Loading…</p></div></div>
+      ${actRanking("Needs attention", issues, (x) => `<li class="issue"><span class="act-dot ${x.cls === "bad" ? "unproductive" : x.cls === "warn" ? "neutral" : "undefined"}"></span><a class="link who" href="${x.link}">${esc(x.text)}</a><span class="badge ${x.cls}">${x.cls === "bad" ? "Problem" : x.cls === "warn" ? "Check" : "Info"}</span></li>`, "Nothing needs attention. 🎉")}
+      ${actRanking("Connections", items, (i) => `<li class="conn"><span class="kind">${esc({ ad: "AD", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds", vnx: "VNX" }[i.kind] || i.kind)}</span><span class="who">${esc(i.name)}${i.demo ? ' <span class="muted">demo</span>' : ""}</span>${i.error ? '<span class="badge bad">Unreachable</span>' : '<span class="badge ok">Online</span>'}</li>`, "No connections yet.")}
+    </div>
+    <h2 class="dash-sub">Connections & tools</h2>
     <div class="grid">${certTile(certs)}${cards}${resetTile()}${powershellTile()}</div>`;
   $("#refresh").onclick = renderDashboard;
   view.querySelectorAll("[data-pick]").forEach((a) => a.addEventListener("click", () => {
     const [kind, id] = a.dataset.pick.split(":");
     state[{ ad: "ad", vsphere: "vs", idrac: "idrac", solarwinds: "sw", vnx: "vnx" }[kind]] = id;
   }));
+  const drawTrend = () => {
+    const [key, label, fmt] = DASH_METRICS.find(([k]) => k === state.dashMetric);
+    $("#dash-chart").innerHTML = dashLine(hist?.days || [], hist?.series?.[key] || [], label, fmt);
+    wireDashLine($("#dash-chart"), hist?.days || [], hist?.series?.[key] || [], fmt);
+  };
+  view.querySelectorAll("#dash-metric button").forEach((b) => b.onclick = () => { state.dashMetric = b.dataset.m;
+    view.querySelectorAll("#dash-metric button").forEach((x) => x.classList.toggle("active", x === b)); drawTrend(); });
+  view.querySelectorAll("#dash-days button").forEach((b) => b.onclick = () => { state.dashDays = Number(b.dataset.d); renderDashboard(); });
+  drawTrend();
+  // Fullest datastores, across every vCenter.
+  const vcs = items.filter((i) => i.kind === "vsphere" && !i.error);
+  Promise.all(vcs.map((c) => api("GET", `/api/vsphere/${c.id}/datastores`).then((ds) => ds.map((d) => ({ ...d, vc: c.name }))).catch(() => [])))
+    .then((lists) => {
+      const ds = lists.flat().filter((d) => d.capacity).map((d) => ({ ...d, pct: Math.round((1 - d.free_space / d.capacity) * 1000) / 10 }))
+        .sort((x, y) => y.pct - x.pct).slice(0, 8);
+      const box = $("#dash-ds");
+      if (!box) return;
+      box.innerHTML = ds.length ? `<ol>${ds.map((d, i) => `<li><span class="n">${i + 1}</span><span class="who">${esc(d.name)} <span class="muted">${fmtBytes(d.free_space)} free</span></span><span class="val">${d.pct}%</span>
+        <div class="bar"><div class="${d.pct >= 90 ? "hot" : "used"}" style="width:${d.pct}%"></div></div></li>`).join("")}</ol>`
+        : `<p class="muted">${vcs.length ? "No datastores reported." : "Add a vCenter to see its datastores here."}</p>`;
+    });
+}
+
+// The trend chart's metrics: [key, label, how to show a value].
+const DASH_METRICS = [["storage_used_pct", "Storage used", (v) => `${v}%`], ["locked", "Locked out", (v) => fmtNum(v)],
+  ["vms_on", "VMs on", (v) => fmtNum(v)], ["problems", "Problems", (v) => fmtNum(v)]];
+
+function dashGauge(pct, level) {
+  const r = 52, c = 2 * Math.PI * r, arc = c * 0.75, val = Math.max(0, Math.min(100, pct || 0)) / 100 * arc;
+  return `<svg viewBox="0 0 140 130" class="act-gauge dash-gauge ${level}" role="img" aria-label="Infrastructure health ${pct ?? "unknown"}%">
+    <circle cx="70" cy="70" r="${r}" class="track" stroke-dasharray="${arc} ${c}" transform="rotate(135 70 70)"/>
+    <circle cx="70" cy="70" r="${r}" class="value" stroke-dasharray="${val} ${c}" transform="rotate(135 70 70)"/>
+    <text x="70" y="78" text-anchor="middle" class="num">${pct == null ? "–" : Math.round(pct) + "%"}</text></svg>`;
+}
+
+// One series over time: a 2px line over a light area, a crosshair and tooltip on hover.
+function dashLine(days, values, label, fmt) {
+  const pts = days.map((d, i) => [d, values[i]]).filter(([, v]) => v != null);
+  if (pts.length < 2) {
+    return `<p class="muted" style="margin:40px 0;text-align:center">KasTec saves one snapshot of these numbers each day the dashboard is opened.
+      The ${esc(label.toLowerCase())} trend appears from the second day${pts.length ? ` (today: ${fmt(pts[0][1])})` : ""}.</p>`;
+  }
+  const W = 760, H = 220, L = 44, B = 26, T = 10, plotH = H - B - T, plotW = W - L - 10;
+  const max = Math.max(...pts.map(([, v]) => v)), top = label === "Storage used" ? 100 : Math.max(1, Math.ceil(max * 1.15));
+  const x = (i) => L + (pts.length === 1 ? plotW / 2 : i / (pts.length - 1) * plotW), y = (v) => T + plotH - v / top * plotH;
+  const line = pts.map(([, v], i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const grid = [0, 0.25, 0.5, 0.75, 1].map((f) => { const v = top * f, yy = y(v);
+    return `<line class="grid" x1="${L}" x2="${W - 10}" y1="${yy}" y2="${yy}"/><text class="axis" x="${L - 6}" y="${yy + 4}" text-anchor="end">${esc(fmt(Math.round(v * 10) / 10))}</text>`; }).join("");
+  const every = Math.ceil(pts.length / 8), last = pts.length - 1;
+  // Every few days, and always the last day, but never a label crowding the last one.
+  const labels = pts.map(([d], i) => ((i % every === 0 && last - i >= every * 0.6) || i === last) ? `<text class="axis" x="${x(i)}" y="${H - 8}" text-anchor="${i === last ? "end" : i === 0 ? "start" : "middle"}">${esc(new Date(d + "T12:00").toLocaleDateString(undefined, { day: "numeric", month: "short" }))}</text>` : "").join("");
+  const slot = plotW / Math.max(1, pts.length - 1);
+  const hits = pts.map((_, i) => `<rect class="hit" x="${x(i) - slot / 2}" y="${T}" width="${slot}" height="${plotH}" data-i="${i}"/>`).join("");
+  return `<div class="act-chart dash-line"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${esc(label)} per day">${grid}
+    <path class="area" d="${line} L${x(pts.length - 1)},${T + plotH} L${x(0)},${T + plotH} Z"/><path class="line" d="${line}"/>${labels}
+    <line class="cross hidden" y1="${T}" y2="${T + plotH}"/><circle class="dot hidden" r="4.5"/>${hits}</svg><div class="act-tip hidden"></div></div>`;
+}
+
+function wireDashLine(box, days, values, fmt) {
+  const svg = box.querySelector("svg");
+  if (!svg) return;
+  const pts = days.map((d, i) => [d, values[i]]).filter(([, v]) => v != null);
+  const tip = box.querySelector(".act-tip"), cross = svg.querySelector(".cross"), dot = svg.querySelector(".dot");
+  const W = 760, H = 220, L = 44, B = 26, T = 10, plotH = H - B - T, plotW = W - L - 10;
+  const max = Math.max(...pts.map(([, v]) => v)), top = svg.getAttribute("aria-label").startsWith("Storage used") ? 100 : Math.max(1, Math.ceil(max * 1.15));
+  svg.querySelectorAll(".hit").forEach((r) => {
+    r.addEventListener("mouseenter", () => {
+      const i = Number(r.dataset.i), [d, v] = pts[i];
+      const cx = L + i / (pts.length - 1) * plotW, cy = T + plotH - v / top * plotH;
+      cross.setAttribute("x1", cx); cross.setAttribute("x2", cx); dot.setAttribute("cx", cx); dot.setAttribute("cy", cy);
+      cross.classList.remove("hidden"); dot.classList.remove("hidden");
+      tip.innerHTML = `<b>${esc(new Date(d + "T12:00").toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" }))}</b><div>${esc(fmt(v))}</div>`;
+      const b = svg.getBoundingClientRect();
+      tip.style.left = `${Math.min(cx / W * b.width + 10, b.width - 200)}px`;
+      tip.classList.remove("hidden");
+    });
+    r.addEventListener("mouseleave", () => { tip.classList.add("hidden"); cross.classList.add("hidden"); dot.classList.add("hidden"); });
+  });
 }
 
 // ---- certificate expiry --------------------------------------------------
@@ -1449,7 +1548,7 @@ function actLabelBadge(label) {
 function actDelta(value, goodWhenUp, unit = "") {
   if (value == null || value === 0) return value === 0 ? '<span class="act-delta flat">±0</span>' : "";
   const up = value > 0, good = up === goodWhenUp;
-  return `<span class="act-delta ${good ? "good" : "bad"}" title="Change from the previous period">${up ? `▲ +${value}` : `▼ −${Math.abs(value)}`}${unit}</span>`;
+  return `<span class="act-delta ${goodWhenUp === null ? "flat" : good ? "good" : "bad"}" title="Change from the previous period">${up ? `▲ +${value}` : `▼ −${Math.abs(value)}`}${unit}</span>`;
 }
 
 // The AI-usage ring: a 270° track with the share drawn over it.

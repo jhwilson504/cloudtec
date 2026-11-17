@@ -27,7 +27,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
-from . import activity, provision
+from . import activity, metrics, provision
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -215,6 +215,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     throttle = LoginThrottle()
     audit_path = settings.data_dir / "audit.log"
     activity_store = activity.ActivityStore(settings.data_dir)
+    metrics_store = metrics.MetricsStore(settings.data_dir)
+    last_totals: dict = {}
     audit_lock = threading.Lock()
     local_addresses = this_computer_addresses()
     exe = find_powershell(settings.powershell)
@@ -608,7 +610,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if result:
                 learn_dcs(conn, result[1])
             out.append({**conn.public(), "summary": result[0] if result else None, "error": error})
+        if out:
+            t = metrics.totals(out)
+            metrics_store.record(t)
+            last_totals.clear()
+            last_totals.update(t)
         return out
+
+    @app.get("/api/dashboard/history", dependencies=api)
+    def dashboard_history(days: int = 30):
+        """Daily snapshots for the dashboard's trends, and today's totals with the health score's parts."""
+        return {**metrics_store.history(max(2, min(365, days))), "today": dict(last_totals)}
 
     @app.get("/api/search", dependencies=api)
     def search(q: str):

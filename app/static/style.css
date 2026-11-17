@@ -375,3 +375,22 @@ body.popout .term { height: calc(100vh - 150px); }
 .act-rank .bar .productive { background: var(--act-productive); } .act-rank .bar .unproductive { background: var(--act-unproductive); }
 .act-steps li { margin: 6px 0; line-height: 1.6; }
 @media (max-width: 800px) { .act-row { grid-template-columns: 1fr; } }
+
+/* Dashboard (same layout as Employee activity) */
+.dash-kpi .of { font-size: 16px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.dash-kpi .s { color: var(--muted); font-size: 12px; }
+.dash-gauge.ok .value { stroke: var(--ok); } .dash-gauge.warn .value { stroke: var(--warn); } .dash-gauge.bad .value { stroke: var(--bad); }
+.dash-gauge.plain .value { stroke: var(--border); }
+.dash-trend h3 { font-size: 15px; }
+.dash-line svg { height: 230px; margin-top: 8px; }
+.dash-line .line { fill: none; stroke: var(--accent); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.dash-line .area { fill: var(--accent); fill-opacity: .1; }
+.dash-line .cross { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; vector-effect: non-scaling-stroke; }
+.dash-line .dot { fill: var(--accent); stroke: var(--panel); stroke-width: 2; }
+.act-rank .bar .used { background: var(--accent); } .act-rank .bar .hot { background: var(--bad); }
+.act-rank li.issue { grid-template-columns: 22px 1fr auto; }
+.act-rank li.issue .act-dot { margin: 0 auto; }
+.act-rank li.issue .n { font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
+.dash-sub { margin: 20px 0 12px; font-size: 16px; }
+.act-rank li.conn { grid-template-columns: 78px 1fr auto; }
+.act-rank li.conn .kind { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .03em; }
