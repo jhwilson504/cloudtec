@@ -1,4 +1,8 @@
-"""vCenter via the vSphere Automation REST API (vCenter 7.0 U2 and later).
+"""vCenter via the vSphere Automation REST API.
+
+vCenter 7.0 U2 and later answer at /api/...; vCenter 6.5 and 6.7 only have the older /rest/... form of the same
+API (results wrapped in {"value": ...}, filters named filter.<name>, maps sent as key/value lists, power actions
+in the path). KasTec signs in with /api first and switches to /rest when vCenter doesn't have it.
 
 Config keys:
     host        vCenter hostname or IP
@@ -32,12 +36,18 @@ class VSphereConnector:
         self.base_url = f"https://{host}:{int(config.get('port') or 443)}"
         self._transport = transport  # tests inject a mock vCenter here
         self._client: httpx.Client | None = None
+        self.legacy = False  # True for vCenter 6.5/6.7 (/rest)
 
     def __enter__(self) -> "VSphereConnector":
         self._client = httpx.Client(base_url=self.base_url, verify=self.verify_ssl, timeout=30,
                                     transport=self._transport)
         try:
             r = self._client.post("/api/session", auth=(self.username, self.password))
+            if r.status_code not in (200, 201, 401):
+                # vCenter 6.x has no /api: sign in through the older /rest form instead.
+                legacy = self._client.post("/rest/com/vmware/cis/session", auth=(self.username, self.password))
+                if legacy.status_code != 404:
+                    self.legacy, r = True, legacy
         except httpx.HTTPError as e:
             self._client.close()
             raise ConnectorError(f"Could not reach vCenter at {self.base_url}: {e}") from e
@@ -46,28 +56,37 @@ class VSphereConnector:
             raise ConnectorError("vCenter rejected the username or password")
         if r.status_code >= 400:
             self._client.close()
-            raise ConnectorError(f"vCenter login failed (HTTP {r.status_code})")
-        self._client.headers["vmware-api-session-id"] = r.json()
+            raise ConnectorError(f"vCenter login failed (HTTP {r.status_code}): {_error_text(r)}")
+        token = r.json()
+        self._client.headers["vmware-api-session-id"] = token["value"] if isinstance(token, dict) else token
         return self
 
     def __exit__(self, *exc) -> None:
         if self._client:
             try:
-                self._client.delete("/api/session")
+                self._client.delete("/rest/com/vmware/cis/session" if self.legacy else "/api/session")
             except httpx.HTTPError:
                 pass
             self._client.close()
 
     def _get(self, path: str, **params):
+        if self.legacy:
+            path = "/rest/" + path.removeprefix("/api/")
+            params = {f"filter.{k}": v for k, v in params.items()}
         try:
             r = self._client.get(path, params=params or None)
         except httpx.HTTPError as e:
             raise ConnectorError(f"vCenter request failed: {e}") from e
         if r.status_code >= 400:
             raise ConnectorError(f"vCenter returned HTTP {r.status_code} for {path}: {_error_text(r)}")
-        return r.json()
+        data = r.json()
+        return data["value"] if self.legacy and isinstance(data, dict) and "value" in data else data
 
     def _post(self, path: str, **params) -> None:
+        if self.legacy:
+            path = "/rest/" + path.removeprefix("/api/")
+            if path.endswith("/power") and "/guest/" not in path:
+                path, params = f"{path}/{params.pop('action')}", {}   # /rest/vcenter/vm/{vm}/power/start
         try:
             r = self._client.post(path, params=params or None)
         except httpx.HTTPError as e:
@@ -122,11 +141,11 @@ class VSphereConnector:
             "memory_mb": (info.get("memory") or {}).get("size_MiB"),
             "disks": [
                 {"label": d.get("label"), "capacity": d.get("capacity")}
-                for d in (info.get("disks") or {}).values()
+                for d in _as_map(info.get("disks")).values()
             ],
             "nics": [
                 {"label": n.get("label"), "mac": n.get("mac_address"), "state": n.get("state")}
-                for n in (info.get("nics") or {}).values()
+                for n in _as_map(info.get("nics")).values()
             ],
             "hostname": None,
             "ip_address": None,
@@ -242,6 +261,13 @@ class VSphereConnector:
             self._post(f"/api/vcenter/vm/{vm_id}/guest/power", action=action)
         else:
             raise ConnectorError(f"Unknown power action {action!r}")
+
+
+def _as_map(value) -> dict:
+    """The /api form sends maps as objects; the older /rest form as [{"key": ..., "value": ...}] lists."""
+    if isinstance(value, list):
+        return {item.get("key"): item.get("value") or {} for item in value if isinstance(item, dict)}
+    return value or {}
 
 
 def _check_vm(vm_id: str) -> None:
