@@ -452,3 +452,13 @@ body.popout .term { height: calc(100vh - 150px); }
 .net-tip .muted { display: block; margin-top: 2px; }
 .lane-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; }
 .lane-key.in { background: var(--net-in); } .lane-key.out { background: var(--net-out); }
+
+/* Connect: RDP, SSH terminal, guest commands */
+.connect-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 14px 0 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.guest-run { margin: 8px 0; border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--panel-2); }
+.guest-run summary { cursor: pointer; }
+.guest-run[disabled] { opacity: .55; pointer-events: none; }
+.gr-out { background: #0b1220; color: #e6ebf1; border-radius: 8px; padding: 10px 12px; max-height: 320px; overflow: auto;
+  white-space: pre-wrap; font: 12.5px/1.45 Consolas, "Cascadia Mono", Menlo, monospace; margin: 10px 0 0; }
+.gr-out.bad { color: #ff9a9a; }
+.ssh-term { background: #0b1220; padding: 8px; border-radius: 10px; overflow-x: auto; }

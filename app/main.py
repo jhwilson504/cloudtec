@@ -27,7 +27,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
-from . import activity, metrics, netmap, provision
+from . import activity, metrics, netmap, provision, remote
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -157,6 +157,25 @@ class AgentReportBody(BaseModel):
     samples: list[dict] = Field(default_factory=list, max_length=5000)
 
 
+class SSHOpenBody(BaseModel):
+    host: str = Field(min_length=1, max_length=253)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=1024)
+    trust_fingerprint: str = ""
+
+
+class SSHWriteBody(BaseModel):
+    data: str = Field(max_length=65536)
+
+
+class GuestRunBody(BaseModel):
+    command: str = Field(min_length=1, max_length=20000)
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+    script_type: Literal["Bash", "PowerShell", "Bat"] = "Bash"
+
+
 class DCNameBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
 
@@ -221,6 +240,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     local_addresses = this_computer_addresses()
     exe = find_powershell(settings.powershell)
     netmaps = netmap.NetMaps(exe)
+    ssh = remote.SSHSessions(settings.data_dir)
     shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
     watcher = certwatch.Watcher(settings)
 
@@ -229,6 +249,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         watcher.start()
         yield
         watcher.stop()
+        ssh.close_all()
+        netmaps.close()
         if shell:
             shell.close()
 
@@ -1270,6 +1292,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         audit(request, "Employee activity: downloaded the agent", base)
         return Response(text, media_type="text/plain; charset=utf-8",
                         headers={"Content-Disposition": 'attachment; filename="KasTecAgent.ps1"'})
+
+    # --- getting into servers: RDP files, SSH terminals, guest commands ---------
+
+    @app.get("/api/connect/rdp", dependencies=api)
+    def connect_rdp(host: str, request: Request, name: str = "", user: str = ""):
+        """A Remote Desktop file for mstsc on the viewer's PC; the connection runs from there."""
+        try:
+            text = remote.rdp_file(host.strip(), user.strip())
+        except remote.RemoteError as e:
+            raise HTTPException(422, str(e)) from e
+        filename = re.sub(r"[^A-Za-z0-9._-]", "_", name or host)[:60] or "server"
+        audit(request, "RDP: downloaded a connection file", host)
+        return Response(text, media_type="application/x-rdp",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}.rdp"'})
+
+    def who(request: Request) -> str:
+        return (getattr(request.state, "user", None) or {}).get("username") or "?"
+
+    @app.post("/api/ssh/open", dependencies=admin_only)
+    def ssh_open(body: SSHOpenBody, request: Request):
+        host = body.host.strip()
+        try:
+            if body.trust_fingerprint:
+                ssh.trust(host, body.trust_fingerprint.strip())
+                audit(request, "SSH: trusted a server key", f"{host} {body.trust_fingerprint.strip()}")
+            s = ssh.open(host, body.port, body.username.strip(), body.password, who(request))
+        except remote.HostKeyNeeded as e:
+            return JSONResponse(status_code=409, content={"detail": str(e), "fingerprint": e.fingerprint, "changed": e.changed})
+        except remote.RemoteError as e:
+            raise HTTPException(502, str(e)) from e
+        audit(request, "SSH: opened a session", f"{s.user}@{s.host}")
+        return {"sid": s.sid, "host": s.host, "user": s.user}
+
+    @app.get("/api/ssh/{sid}/read", dependencies=admin_only)
+    def ssh_read(sid: str, request: Request, since: int = 0):
+        try:
+            return ssh.read(sid, who(request), since)
+        except remote.RemoteError as e:
+            raise HTTPException(410, str(e)) from e
+
+    @app.post("/api/ssh/{sid}/write", dependencies=admin_only)
+    def ssh_write(sid: str, body: SSHWriteBody, request: Request):
+        try:
+            ssh.write(sid, who(request), body.data)
+        except remote.RemoteError as e:
+            raise HTTPException(410, str(e)) from e
+        return {"ok": True}
+
+    @app.delete("/api/ssh/{sid}", dependencies=admin_only)
+    def ssh_close(sid: str, request: Request):
+        s = ssh.close(sid, who(request))
+        if s:
+            audit(request, "SSH: closed a session", f"{s.user}@{s.host}")
+        return {"ok": True}
+
+    @app.post("/api/vsphere/{conn_id}/vms/{vm_id}/guest/run", dependencies=admin_only)
+    def vsphere_guest_run(conn_id: str, vm_id: str, body: GuestRunBody, request: Request):
+        """Run a command inside a VM through VMware Tools (PowerCLI Invoke-VMScript)."""
+        conn = get_conn(conn_id, "vsphere")
+        audit(request, f"Ran a command inside VM {vm_id} ({body.script_type}) as {body.username}", body.command[:300], conn)
+        try:
+            if conn.demo:
+                with open_connector(conn) as c:
+                    return c.guest_run(vm_id, body.command, body.username, body.password, body.script_type)
+            return netmaps.guest_run(conn, vm_id, body.command, body.username, body.password, body.script_type)
+        except netmap.NetMapError as e:
+            raise HTTPException(502, str(e)) from e
 
     # --- iDRAC -------------------------------------------------------------
 

@@ -308,6 +308,23 @@ class DemoVSphere:
                          {"id": "network-12", "name": "VM Network", "type": "STANDARD_PORTGROUP"}],
         }]}
 
+    def guest_run(self, vm_id: str, command: str, user: str, password: str, script_type: str) -> dict:
+        """What Invoke-VMScript would return, for a few common commands."""
+        v = self._vm(vm_id)
+        if v["power_state"] != "POWERED_ON":
+            raise ConnectorError(f"{v['name']} is powered off, so VMware Tools can't run commands in it")
+        name, cmd = v["name"].lower(), command.strip()
+        canned = {
+            "hostname": name, "whoami": user, "uptime": " 09:14:02 up 41 days,  3:12,  0 users,  load average: 0.08, 0.05, 0.01",
+            "uname -a": f"Linux {name} 5.15.0-119-generic #129-Ubuntu SMP x86_64 GNU/Linux",
+            "df -h": "Filesystem      Size  Used Avail Use% Mounted on\n/dev/sda1        98G   41G   53G  44% /\ntmpfs           3.9G     0  3.9G   0% /dev/shm",
+            "Get-Service W32Time": "Status   Name               DisplayName\n------   ----               -----------\nRunning  W32Time            Windows Time",
+            "ipconfig": "Windows IP Configuration\n\nEthernet adapter Ethernet0:\n   IPv4 Address. . . . . . . . . . . : 10.20.0.15",
+        }
+        out = canned.get(cmd, f"(demo) Ran {cmd!r} as {user} with {script_type} inside {v['name']}. On a real vCenter "
+                              "this is the command's own output.")
+        return {"output": out + "\n", "exit_code": 0}
+
     def network_raw(self) -> dict:
         """The network layout in the same shape KasTec's PowerCLI script returns."""
         placement = {}

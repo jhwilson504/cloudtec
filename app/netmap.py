@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -130,6 +131,37 @@ if ($vs) {
 }
 'TRAFFIC-DONE'
 """
+
+
+GUEST_TYPES = ("Bash", "PowerShell", "Bat")
+
+
+def guest_script(vm_id: str, command: str, user: str, password: str, script_type: str) -> str:
+    """Invoke-VMScript: run a command inside a VM through VMware Tools (no network path to the VM needed)."""
+    if not re.fullmatch(r"vm-\d+", vm_id) or script_type not in GUEST_TYPES:
+        raise NetMapError("Invalid VM or script type")
+    return f"""
+$vm = VMware.VimAutomation.Core\\Get-VM -Server $vi -Id {ps_quote('VirtualMachine-' + vm_id)}
+$r = Invoke-VMScript -Server $vi -VM $vm -ScriptText {ps_quote(command)} -GuestUser {ps_quote(user)} -GuestPassword {ps_quote(password)} -ScriptType {script_type} -ErrorAction Stop
+'GUEST-EXIT|' + $r.ExitCode
+$b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$r.ScriptOutput))
+for ($i = 0; $i -lt $b64.Length; $i += 150) {{ 'GUEST-OUT|' + $b64.Substring($i, [Math]::Min(150, $b64.Length - $i)) }}
+'GUEST-DONE'
+"""
+
+
+def parse_guest(output: str) -> dict:
+    _check(output)
+    if "GUEST-DONE" not in output:
+        raise NetMapError(f"The command didn't finish: {output.strip()[-300:] or 'no output'}")
+    code, chunks = None, []
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("GUEST-EXIT|"):
+            code = int(line.split("|", 1)[1] or 0)
+        elif line.startswith("GUEST-OUT|"):
+            chunks.append(line[len("GUEST-OUT|"):])
+    return {"output": base64.b64decode("".join(chunks)).decode("utf-8", "replace") if chunks else "", "exit_code": code}
 
 
 def _wrap(conn, body: str) -> str:
@@ -285,6 +317,11 @@ class NetMaps:
                 raise NetMapError(f"vCenter didn't return traffic figures: {r['output'].strip()[-300:] or 'no output'}")
             return {**parse_traffic(r["output"]), "at": time.time()}
         return self._cached("traffic", conn, TRAFFIC_TTL, False, make)
+
+    def guest_run(self, conn, vm_id: str, command: str, user: str, password: str, script_type: str) -> dict:
+        script = guest_script(vm_id, command, user, password, script_type)
+        r = self._session(conn).run(_wrap(conn, script), timeout=330, log_as=f"[guest command] {vm_id}")
+        return parse_guest(r["output"])
 
     def close(self) -> None:
         with self._lock:

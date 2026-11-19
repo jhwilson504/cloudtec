@@ -33,7 +33,7 @@ async function api(method, path, body) {
   if (!res.ok) {
     let msg = data?.detail ?? `HTTP ${res.status}`;
     if (Array.isArray(msg)) msg = msg.map((d) => d.msg).join("; ");
-    throw new Error(msg);
+    throw Object.assign(new Error(msg), { status: res.status, data });
   }
   return data;
 }
@@ -89,7 +89,11 @@ function modal(html, wide = false) {
   $("#modal .modal-card").classList.toggle("wide", wide);
   $("#modal").classList.remove("hidden");
 }
-function closeModal() { $("#modal").classList.add("hidden"); }
+function closeModal() {
+  $("#modal").classList.add("hidden");
+  const hook = state.onModalClose; state.onModalClose = null;
+  if (hook) hook();   // e.g. end an SSH session when its window closes
+}
 $("#modal").addEventListener("click", (e) => {
   if (e.target.id === "modal" || e.target.closest("[data-close]")) closeModal();
 });
@@ -1420,10 +1424,149 @@ function bindVmActions(root, vms, reload, connId = () => state.vs) {
   root.querySelectorAll("[data-vm]").forEach((btn) => btn.onclick = () => showVm(connId(vms[btn.dataset.vm]), vms[btn.dataset.vm].id));
 }
 
+// ---- getting into servers: RDP files, SSH terminal, guest commands ------------------
+
+const rdpUrl = (host, name) => `/api/connect/rdp?host=${encodeURIComponent(host)}&name=${encodeURIComponent(name || host)}`;
+const isWindowsOs = (os) => /WINDOWS/i.test(os || "");
+const isLinuxOs = (os) => /LINUX|UBUNTU|CENTOS|RHEL|DEBIAN|SLES|SUSE|ORACLE|PHOTON|FREEBSD|OTHER/i.test(os || "");
+
+let xtermLoading;
+function loadXterm() {
+  // The terminal component (xterm.js, MIT licence) ships with KasTec in /static/vendor; load it on first use.
+  return (xtermLoading ||= new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet"; css.href = "/static/vendor/xterm.css";
+    document.head.appendChild(css);
+    const js = document.createElement("script");
+    js.src = "/static/vendor/xterm.js";
+    js.onload = () => resolve(window.Terminal);
+    js.onerror = () => { xtermLoading = null; reject(new Error("Couldn't load the terminal component")); };
+    document.head.appendChild(js);
+  }));
+}
+
+// An SSH terminal in a window: KasTec signs in with plink from its own computer and relays the screen here.
+async function openSSH({ host = "", title = "" } = {}) {
+  modal(`<h2>SSH${title ? ` to ${esc(title)}` : ""}</h2>
+    <form id="ssh-form" class="form" autocomplete="off">
+      <label>Server <input name="host" required value="${esc(host)}" placeholder="10.50.241.106 or bspdrpntp001.btc.ad.corp" spellcheck="false"></label>
+      <label>Port <input name="port" type="number" value="22" min="1" max="65535"></label>
+      <label>Username <input name="user" required autocomplete="off" spellcheck="false" placeholder="root, or your Linux account"></label>
+      <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
+      <p class="full muted small-note" style="margin:0">KasTec connects from the computer it runs on, with PuTTY's plink. The password is used once to sign in and isn't saved.</p>
+      <div class="full" id="ssh-msg"></div>
+      <div class="full modal-actions"><button type="button" class="btn" data-close>Cancel</button><button class="btn primary" id="ssh-go">Connect</button></div>
+    </form>
+    <div id="ssh-session" class="hidden"><div class="row" style="justify-content:space-between;margin-bottom:8px">
+        <span class="muted" id="ssh-title"></span><button class="btn small danger" id="ssh-end">Disconnect</button></div>
+      <div id="ssh-term" class="ssh-term"></div>
+      <p class="muted small-note">Copy: select text, then Ctrl+C · Paste: Ctrl+V. The session closes after 30 minutes without use.</p></div>`, true);
+  const form = $("#ssh-form"), msg = (h) => { $("#ssh-msg").innerHTML = h; };
+  let trust = "";
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    $("#ssh-go").disabled = true; msg('<p class="muted">Connecting…</p>');
+    let s;
+    try {
+      [, s] = await Promise.all([loadXterm(), api("POST", "/api/ssh/open", { host: form.host.value.trim(), port: Number(form.port.value) || 22,
+        username: form.user.value.trim(), password: form.password.value, trust_fingerprint: trust })]);
+    } catch (err) {
+      $("#ssh-go").disabled = false;
+      if (err.status === 409 && err.data?.fingerprint) {
+        trust = err.data.fingerprint;
+        msg(err.data.changed
+          ? `<div class="notice bad"><b>${esc(form.host.value)}'s SSH key has changed</b> since KasTec last connected. That happens when a server is rebuilt, but it can also mean something else is answering at that address.
+              New key: <span class="mono">${esc(trust)}</span>. Only continue if you know why it changed.</div>`
+          : `<div class="notice">First connection to <b>${esc(form.host.value)}</b>. Its SSH key fingerprint is <span class="mono">${esc(trust)}</span>.
+              If that's right (check on the server: <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>), connect to trust it from now on.</div>`);
+        $("#ssh-go").textContent = err.data.changed ? "Trust the new key and connect" : "Trust and connect";
+        return;
+      }
+      msg(`<div class="notice bad">${esc(err.message)}</div>`);
+      return;
+    }
+    form.password.value = "";
+    form.classList.add("hidden");
+    $("#ssh-session").classList.remove("hidden");
+    $("#ssh-title").textContent = `${s.user}@${s.host}`;
+    runTerminal(s);
+  };
+}
+
+function runTerminal(s) {
+  const term = new window.Terminal({ cols: 110, rows: 30, cursorBlink: true, scrollback: 5000, convertEol: false,
+    fontFamily: 'Consolas, "Cascadia Mono", Menlo, monospace', fontSize: 14,
+    theme: { background: "#0b1220", foreground: "#e6ebf1", cursor: "#4f8bff", selectionBackground: "#3d5a8a" } });
+  term.open($("#ssh-term"));
+  term.focus();
+  let since = 0, open = true, pending = "", timer = null;
+  const end = (why) => { if (!open) return; open = false; term.write(`\r\n\x1b[90m[${why}]\x1b[0m\r\n`); $("#ssh-end").disabled = true; };
+  const send = () => {
+    const data = pending; pending = ""; timer = null;
+    if (data && open) api("POST", `/api/ssh/${s.sid}/write`, { data }).catch(() => end("session ended"));
+  };
+  term.onData((d) => { pending += d; if (!timer) timer = setTimeout(send, 15); });
+  const decoder = (b64) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  (async () => {
+    // Match the server's terminal size to this window, then clear the screen.
+    setTimeout(() => { if (open) { pending += "stty cols 110 rows 30 2>/dev/null; clear\r"; send(); } }, 700);
+    while (open) {
+      try {
+        const r = await api("GET", `/api/ssh/${s.sid}/read?since=${since}`);
+        if (r.data) term.write(decoder(r.data));
+        since = r.next;
+        if (r.closed) { end("session ended"); break; }
+      } catch { end("session ended"); break; }
+    }
+  })();
+  const close = () => { if (open) { open = false; api("DELETE", `/api/ssh/${s.sid}`).catch(() => {}); } term.dispose(); };
+  $("#ssh-end").onclick = () => { api("DELETE", `/api/ssh/${s.sid}`).catch(() => {}); end("disconnected"); };
+  state.onModalClose = close;
+}
+
+// Run a command inside a VM through VMware Tools (PowerCLI Invoke-VMScript): no network path to the VM needed.
+function guestRunPanel(connId, v) {
+  const type = isWindowsOs(v.guest_os) ? "PowerShell" : "Bash";
+  const examples = type === "Bash" ? "hostname, uptime, df -h, systemctl status sshd" : "Get-Service W32Time, ipconfig, Get-HotFix | Select -Last 5";
+  return {
+    html: `<details class="guest-run" ${v.power_state === "POWERED_ON" ? "" : "disabled"}><summary><b>Run a command inside ${esc(v.name)}</b>
+        <span class="muted">through VMware Tools, no network path to the VM needed</span></summary>
+      <form id="gr-form" class="form" autocomplete="off" style="margin-top:10px">
+        <label>Guest username <input name="user" required spellcheck="false" placeholder="${type === "Bash" ? "root" : "Administrator or DOMAIN\\name"}"></label>
+        <label>Password <input name="password" type="password" required autocomplete="new-password"></label>
+        <label>Run with <select name="type">${["Bash", "PowerShell", "Bat"].map((t) => `<option ${t === type ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+        <label class="full">Command <textarea name="cmd" rows="2" spellcheck="false" placeholder="e.g. ${esc(examples)}"></textarea></label>
+        <div class="full row"><button class="btn primary" id="gr-go">Run</button><span class="muted small-note" style="margin:0">Needs VMware Tools running in the VM; the account is the VM's own (not stored).</span></div>
+      </form><pre class="gr-out hidden" id="gr-out"></pre></details>`,
+    wire() {
+      const f = $("#gr-form");
+      if (!f) return;
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const out = $("#gr-out"); out.classList.remove("hidden"); out.classList.remove("bad");
+        out.textContent = "Running…"; $("#gr-go").disabled = true;
+        try {
+          const r = await api("POST", `/api/vsphere/${connId}/vms/${v.id}/guest/run`, { command: f.cmd.value, username: f.user.value.trim(), password: f.password.value, script_type: f.type.value });
+          out.textContent = (r.output || "(no output)") + (r.exit_code ? `\n(exit code ${r.exit_code})` : "");
+          out.classList.toggle("bad", !!r.exit_code);
+        } catch (err) { out.textContent = err.message; out.classList.add("bad"); }
+        $("#gr-go").disabled = false;
+      };
+    },
+  };
+}
+
 async function showVm(connId, vmId) {
   modal('<p class="muted">Loading…</p>');
   try {
     const v = await api("GET", `/api/vsphere/${connId}/vms/${vmId}`);
+    // Connect: RDP for Windows, SSH for Linux (both when the guest OS isn't known), to its name or address.
+    const target = v.hostname || v.ip_address || v.name, win = isWindowsOs(v.guest_os), lin = isLinuxOs(v.guest_os);
+    const connectBar = `<div class="connect-bar"><b>Connect</b>
+      ${!lin ? `<a class="btn" href="${rdpUrl(target, v.name)}" title="Opens Remote Desktop on your PC">🖥 Remote Desktop</a>` : ""}
+      ${!win && isAdmin() ? '<button class="btn" id="vm-ssh">⌨ SSH terminal</button>' : ""}
+      <span class="muted small-note" style="margin:0">to ${esc(target)}</span></div>`;
+    const gr = isAdmin() ? guestRunPanel(connId, v) : null;
     modal(`<h2>${esc(v.name)}</h2><dl class="kv">
       <dt>State</dt><dd>${powerBadge(v.power_state)}</dd>
       <dt>Guest OS</dt><dd>${esc(v.guest_os || "–")}</dd>
@@ -1434,7 +1577,10 @@ async function showVm(connId, vmId) {
       <dt>Disks</dt><dd>${v.disks.map((d) => `${esc(d.label)}: ${fmtBytes(d.capacity)}`).join("<br>") || "–"}</dd>
       <dt>Network</dt><dd>${v.nics.map((n) => `${esc(n.label)} <span class="mono">${esc(n.mac || "")}</span>`).join("<br>") || "–"}</dd>
       <dt>ID</dt><dd class="mono">${esc(v.id)}</dd></dl>
-      <div class="modal-actions"><button class="btn" data-close>Close</button></div>`);
+      ${connectBar}${gr ? gr.html : ""}
+      <div class="modal-actions"><button class="btn" data-close>Close</button></div>`, true);
+    gr?.wire();
+    $("#vm-ssh")?.addEventListener("click", () => openSSH({ host: target, title: v.name }));
   } catch (err) {
     modal(`<div class="notice bad">${esc(err.message)}</div><div class="modal-actions"><button class="btn" data-close>Close</button></div>`);
   }
@@ -2599,14 +2745,15 @@ async function renderDCs() {
           ${stat("Sites", new Set(dcs.map((d) => d.site).filter(Boolean)).size)}
           ${stat("Reachable on 9389", `${count((d) => d.ports["9389"])} / ${dcs.length}`, "needed by PowerShell AD commands")}
         </div>
-        ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon", ...(isAdmin() ? [""] : [])], dcs.map((d, i) => `<tr>
+        ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon", ""], dcs.map((d, i) => `<tr>
           <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div></td>
           <td>${esc(d.site || "–")}</td>
           <td>${esc(d.os || "–")}<div class="sub">${esc(d.os_version || "")}</div></td>
           <td>${roleBadges(d)}</td>
           <td style="white-space:nowrap">${portBadges(d)}</td>
           <td>${fmtDate(d.last_logon)}</td>
-          ${isAdmin() ? `<td class="actions"><button class="btn small danger" data-restart="${i}">Restart</button></td>` : ""}</tr>`), "No domain controllers found.")}
+          <td class="actions"><a class="btn small" href="${rdpUrl(d.dns_name || d.name, d.name)}" title="Opens Remote Desktop on your PC">RDP</a>
+            ${isAdmin() ? `<button class="btn small danger" data-restart="${i}">Restart</button>` : ""}</td></tr>`), "No domain controllers found.")}
         <p class="muted small-note">Ports: ${Object.entries(ports).map(([p, l]) => `${p} ${esc(l)}`).join(" · ")}.
           Green means the computer running KasTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;
       box.querySelectorAll("[data-restart]").forEach((b) => b.onclick = () => restartDC(dcs[b.dataset.restart], dcs, conn));

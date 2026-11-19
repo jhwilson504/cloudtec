@@ -81,7 +81,20 @@ function Get-View {
 }
 
 function Get-VMHost { param($Server) o @{ Name = 'jfkvh10.btcbahamas.com'; ConnectionState = 'Connected' } }
-function Get-VM { param($Server) (o @{ Name = 'BTCPRODDC1'; PowerState = 'PoweredOn' }), (o @{ Name = 'APP02'; PowerState = 'PoweredOff' }) }
+function Get-VM {
+  param($Server, $Id)
+  $all = (o @{ Name = 'BTCPRODDC1'; PowerState = 'PoweredOn'; Id = 'VirtualMachine-vm-1' }), (o @{ Name = 'APP02'; PowerState = 'PoweredOff'; Id = 'VirtualMachine-vm-2' })
+  if ($Id) { $all | Where-Object { $_.Id -eq $Id } } else { $all }
+}
+
+function Invoke-VMScript {
+  param($Server, $VM, $ScriptText, $GuestUser, $GuestPassword, $ScriptType)
+  if (-not $VM) { throw 'Could not find VirtualMachine with given Id.' }
+  if ($VM.PowerState -ne 'PoweredOn') { throw "Operation is not valid due to the current state of the object." }
+  if ($GuestPassword -ne 'guestpw') { throw 'Failed to authenticate with the guest operating system using the supplied credentials.' }
+  o @{ ExitCode = $(if ($ScriptText -like '*fail*') { 3 } else { 0 })
+       ScriptOutput = "ran on $($VM.Name) as $GuestUser with ${ScriptType}:`n$ScriptText`nlast line ünïcode" }
+}
 
 function Get-Stat {
   param($Server, $Entity, $Stat, [switch]$Realtime, $MaxSamples)
