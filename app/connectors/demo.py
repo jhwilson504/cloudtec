@@ -569,6 +569,33 @@ class DemoSolarWinds:
         from .solarwinds import summarize
         return summarize(self.nodes(), self.alerts())
 
+    def network(self, now: float | None = None) -> dict:
+        """Core and access switches and the edge firewall, linked the way SolarWinds' topology would show them."""
+        import math
+        import time as _time
+        from .solarwinds import build_network
+        t = (now or _time.time()) / 50
+        devices = [(201, "FGT-EDGE-01", "10.0.19.250", "Fortinet", "FortiGate 600E"),
+                   (202, "SW-CORE-01", "10.0.19.2", "Cisco", "Catalyst 9500"), (203, "SW-CORE-02", "10.0.19.3", "Cisco", "Catalyst 9500"),
+                   (204, "SW-POINCIANA-VM_ENVIRONMENT", "10.0.19.204", "Cisco", "Catalyst 3850"),
+                   (205, "ESB_Network", "10.0.19.205", "Cisco", "Catalyst 2960X"), (206, "DATA_RECOVERY", "10.0.19.206", "Cisco", "Catalyst 3850")]
+        nodes = [{"NodeID": i, "Caption": n, "IPAddress": ip, "Vendor": v, "MachineType": m, "Category": 1,
+                  "Status": 2 if n == "DATA_RECOVERY" and int(t) % 7 == 0 else 1} for i, n, ip, v, m in devices]
+        wires = [(201, "port3", 202, "Te1/0/1", 10000, 160), (201, "port4", 203, "Te1/0/1", 10000, 90),
+                 (202, "Te1/0/48", 203, "Te1/0/48", 40000, 30), (202, "Gi1/0/1", 204, "Te1/1/1", 10000, 70),
+                 (203, "Gi1/0/2", 204, "Te1/1/2", 10000, 55), (202, "Gi1/0/3", 205, "Gi0/49", 1000, 25),
+                 (203, "Gi1/0/4", 206, "Te1/1/1", 10000, 8)]
+        interfaces, links = [], []
+        for k, (a, ai, b, bi, speed, mbps) in enumerate(wires):
+            wave = 1 + 0.5 * math.sin(t + k * 0.9)
+            rx, tx = mbps * 1e6 * wave, mbps * 0.6e6 * (2 - wave)
+            ia, ib = 1000 + k * 2, 1001 + k * 2
+            interfaces += [{"InterfaceID": ia, "NodeID": a, "Name": ai, "Caption": ai, "Speed": speed * 1e6, "InBps": tx, "OutBps": rx, "Status": 1},
+                           {"InterfaceID": ib, "NodeID": b, "Name": bi, "Caption": bi, "Speed": speed * 1e6, "InBps": rx, "OutBps": tx, "Status": 1}]
+            links.append({"SrcNodeID": a, "SrcInterfaceID": ia, "DestNodeID": b, "DestInterfaceID": ib, "LayerType": "L2"})
+            links.append({"SrcNodeID": b, "SrcInterfaceID": ib, "DestNodeID": a, "DestInterfaceID": ia, "LayerType": "L2"})
+        return build_network(nodes, interfaces, links)
+
 
 # --- VNX: a fake Control Station, so the real parser runs on realistic naviseccli output -----------
 
@@ -674,3 +701,60 @@ class DemoVNX:
             raise ConnectorError(f"The demo array has no storage group {group}")
         with _lock:
             self.extra["pairs"].setdefault(group, []).append((int(hlu), int(alu)))
+
+
+# --- FortiGate: an edge firewall with two internet links and the server networks ------------------
+
+class DemoFortiGate:
+    INTERFACES = [  # name, alias, role, ip, base Mbps in, base Mbps out
+        ("wan1", "ISP-A Fibre", "wan", "203.0.113.10 255.255.255.248", 180, 60),
+        ("wan2", "ISP-B Backup", "wan", "198.51.100.2 255.255.255.252", 4, 2),
+        ("port3", "VCMS-New", "lan", "10.50.241.1 255.255.255.0", 70, 160),
+        ("port4", "VCMS-Only", "lan", "10.0.16.1 255.255.252.0", 40, 90),
+        ("port5", "ESB Network", "lan", "10.0.11.1 255.255.255.0", 12, 25),
+        ("port6", "DMZ", "dmz", "10.0.1.1 255.255.255.0", 20, 8),
+        ("mgmt", "Management", "undefined", "10.0.19.250 255.255.255.0", 0.2, 0.3),
+    ]
+
+    def __init__(self, conn_id: str, config: dict):
+        self.key = f"demo-{conn_id}"
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def test(self) -> dict:
+        return {"ok": True, "message": "Demo FortiGate 600E, FortiOS v7.2.8 (no real firewall contacted)"}
+
+    def network(self, now: float | None = None) -> dict:
+        import math
+        import time as _time
+        from .fortigate import parse_interfaces, rates
+        now = now or _time.time()
+        t = now / 45
+        config, live = [], {}
+        for i, (name, alias, role, ip, rin, rout) in enumerate(self.INTERFACES):
+            config.append({"name": name, "alias": alias, "role": role, "ip": ip, "type": "physical", "vdom": "root", "snmp-index": i + 1})
+            # Byte counters that grow at a rate rising and falling over a few minutes.
+            wave = 1 + 0.45 * math.sin(t + i)
+            elapsed = now - 1_700_000_000
+            live[name] = {"name": name, "link": name != "wan2" or int(now / 600) % 6 != 0, "speed": 10000 if name.startswith("port") else 1000,
+                          "rx_bytes": int(elapsed * rin * 1e6 / 8 * wave), "tx_bytes": int(elapsed * rout * 1e6 / 8 * wave)}
+        ifaces = parse_interfaces(config, live)
+        for i, (name, _a, _r, _ip, rin, rout) in enumerate(self.INTERFACES):
+            wave = 1 + 0.45 * math.sin(t + i)
+            ifaces[i]["rate"] = {"rx": rin * 1e6 * wave, "tx": rout * 1e6 * wave}
+        rates(self.key, {})  # keep the same shape as a real read
+        return {"hostname": "FGT-EDGE-01", "model": "FortiGate 600E", "serial": "FGT6HTB0000DEMO", "version": "v7.2.8",
+                "interfaces": ifaces,
+                "routes": [{"dest": "0.0.0.0/0", "gateway": "203.0.113.9", "interface": "wan1", "type": "static", "distance": 10},
+                           {"dest": "0.0.0.0/0", "gateway": "198.51.100.1", "interface": "wan2", "type": "static", "distance": 20}],
+                "tunnels": []}
+
+    def summary(self) -> dict:
+        n = self.network()
+        wan = [i for i in n["interfaces"] if i["role"] == "wan"]
+        return {"model": n["model"], "hostname": n["hostname"], "version": n["version"], "interfaces": len(n["interfaces"]),
+                "wan_links": len(wan), "wan_down": sum(1 for i in wan if i["link"] is False), "tunnels": 0, "tunnels_down": 0}

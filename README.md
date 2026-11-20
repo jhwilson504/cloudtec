@@ -149,6 +149,23 @@ LUNs are matched to datastores **by name**, because vCenter's API doesn't say wh
 
 KasTec checks the group itself too, so the agent records nothing for anyone outside it, and turning *Record activity* off stops all agents within the hour. The agent keeps up to a week of minutes if KasTec is unreachable, and its log is `%LOCALAPPDATA%\KasTec\agent.log`. *Make a new key* locks out agents using the old one. **Load demo data** fills the pages with sample activity to try them first.
 
+## Ecosystem (the whole network, live)
+
+The **Ecosystem** page draws everything from the internet to the ESXi hosts in one picture: outside destinations,
+internet links and VPN, the FortiGate, its networks (by IP range), core and access switches, ESXi hosts and the
+Zscaler ZPA connectors. Every link shows live traffic in both directions (thicker and faster = more), and hovering
+shows addresses, link speed and utilisation. It refreshes every 20 seconds and is read-only. It is built from:
+
+- **FortiGate** (Connections > Add > FortiGate): interfaces, IP addresses, internet links, routes, IPsec tunnels and
+  per-interface traffic. Create a REST API admin on the FortiGate (System > Administrators > Create New > REST API Admin)
+  with a **read-only** profile and the KasTec server's address as a trusted host, and paste its token as the password.
+- **SolarWinds**: switches and how they're cabled together (needs NPM's topology), with interface traffic.
+- **vCenter**: which switch each ESXi host plugs into (CDP on the host uplinks).
+- **NetFlow** (optional): where traffic goes outside the network. An admin turns it on at the bottom of the
+  Ecosystem page; the page shows the FortiGate CLI to point NetFlow at KasTec (UDP 2055). Allow that port in on the
+  KasTec server: `New-NetFirewallRule -DisplayName "KasTec NetFlow" -Direction Inbound -Protocol UDP -LocalPort 2055 -Action Allow`.
+  This works best with KasTec on a server inside the data centre (see *Running KasTec on a server or VM*).
+
 ## Certificate expiry alerts
 
 KasTec watches certificates and warns **30 days** and again **21 days** before each one expires, and once more if it does expire: a banner on everyone's dashboard, and an email when `KASTEC_SMTP_HOST` is set. KasTec only alerts; it never installs or changes a certificate.

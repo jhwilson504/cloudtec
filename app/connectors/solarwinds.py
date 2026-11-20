@@ -40,6 +40,35 @@ INTERFACES_DOWN = ("SELECT I.InterfaceID, I.Caption, I.Status, I.StatusDescripti
                    "WHERE I.Status IN (2, 12) ORDER BY N.Caption, I.Caption")
 
 
+NET_NODES = "SELECT NodeID, Caption, IPAddress, Vendor, MachineType, Category, Status FROM Orion.Nodes"
+NET_INTERFACES = ("SELECT InterfaceID, NodeID, Caption, Name, Speed, InBps, OutBps, InPercentUtil, OutPercentUtil, Status "
+                  "FROM Orion.NPM.Interfaces")
+NET_TOPOLOGY = "SELECT SrcNodeID, SrcInterfaceID, DestNodeID, DestInterfaceID, LayerType FROM Orion.TopologyConnections"
+CATEGORY = {1: "network", 2: "server"}
+
+
+def build_network(nodes: list[dict], interfaces: list[dict] | None, links: list[dict] | None) -> dict:
+    """Network devices, their interfaces with live traffic, and which interface connects to which (each link once)."""
+    out_nodes = [{"id": n.get("NodeID"), "name": n.get("Caption"), "ip": n.get("IPAddress"), "vendor": n.get("Vendor"),
+                  "model": n.get("MachineType"), "category": CATEGORY.get(int(n.get("Category") or 0), "other"),
+                  "status": status_group(n.get("Status"))} for n in nodes]
+    ifs = {}
+    for i in interfaces or []:
+        ifs[i.get("InterfaceID")] = {"id": i.get("InterfaceID"), "node": i.get("NodeID"), "name": i.get("Name") or i.get("Caption"),
+                                     "caption": i.get("Caption"), "speed": _num(i.get("Speed")), "status": status_group(i.get("Status")),
+                                     "rx": _num(i.get("InBps")), "tx": _num(i.get("OutBps")),
+                                     "in_util": _num(i.get("InPercentUtil")), "out_util": _num(i.get("OutPercentUtil"))}
+    seen, out_links = set(), []
+    for c in links or []:
+        a, b = (c.get("SrcNodeID"), c.get("SrcInterfaceID")), (c.get("DestNodeID"), c.get("DestInterfaceID"))
+        key = tuple(sorted([a, b], key=str))
+        if a[0] == b[0] or key in seen:
+            continue
+        seen.add(key)
+        out_links.append({"a_node": a[0], "a_if": a[1], "b_node": b[0], "b_if": b[1], "layer": c.get("LayerType")})
+    return {"nodes": out_nodes, "interfaces": ifs, "links": out_links, "npm": interfaces is not None}
+
+
 def status_group(code) -> str:
     code = int(code or 0)
     if code == 1:
@@ -165,6 +194,19 @@ class SolarWindsConnector:
 
     def summary(self) -> dict:
         return summarize(self.nodes(), self.alerts())
+
+    def network(self) -> dict:
+        """For the Ecosystem map. Interface traffic and topology need Network Performance Monitor."""
+        nodes = self.query(NET_NODES)
+        try:
+            interfaces = self.query(NET_INTERFACES)
+        except ConnectorError:
+            interfaces = None
+        try:
+            links = self.query(NET_TOPOLOGY)
+        except ConnectorError:
+            links = None
+        return build_network(nodes, interfaces, links)
 
 
 def _num(value):

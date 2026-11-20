@@ -27,7 +27,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
-from . import activity, metrics, netmap, provision, remote
+from . import activity, ecosystem, flows, metrics, netmap, provision, remote
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -42,6 +42,7 @@ CONFIG_FIELDS = {
     "idrac": ("hosts", "verify_ssl", "username"),
     "solarwinds": ("host", "port", "verify_ssl", "username"),
     "vnx": ("host", "port", "username", "sp_a", "sp_b", "host_key"),
+    "fortigate": ("host", "port", "verify_ssl", "vdom"),
 }
 
 
@@ -87,7 +88,7 @@ class ShellConnectBody(BaseModel):
 
 
 class ConnectionBody(BaseModel):
-    kind: Literal["ad", "vsphere", "idrac", "solarwinds", "vnx"]
+    kind: Literal["ad", "vsphere", "idrac", "solarwinds", "vnx", "fortigate"]
     name: str = Field(min_length=1, max_length=80)
     config: dict = {}
     password: str = ""
@@ -241,13 +242,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     exe = find_powershell(settings.powershell)
     netmaps = netmap.NetMaps(exe)
     ssh = remote.SSHSessions(settings.data_dir)
+    flow_collector = flows.FlowCollector(settings.data_dir)
     shell = PowerShellSession(exe, Path.home(), settings.data_dir / "shell_history.log") if exe else None
     watcher = certwatch.Watcher(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         watcher.start()
+        flow_collector.restart()
         yield
+        flow_collector.stop()
         watcher.stop()
         ssh.close_all()
         netmaps.close()
@@ -1359,6 +1363,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return netmaps.guest_run(conn, vm_id, body.command, body.username, body.password, body.script_type)
         except netmap.NetMapError as e:
             raise HTTPException(502, str(e)) from e
+
+    # --- Ecosystem: firewall, switches, hosts and the outside, joined up ------------------
+
+    def flow_summary(minutes: int = 5) -> dict:
+        real = flow_collector.summary(minutes)
+        if real["exporters"]:
+            return real
+        demo = [c for c in store.list() if c.demo and c.kind in ("fortigate", "solarwinds", "vsphere")]
+        return flows.demo_summary() if demo and not real["listening"] else real
+
+    @app.get("/api/ecosystem", dependencies=api)
+    def ecosystem_map():
+        notes, fws, sws, vcs = [], [], [], []
+        for conn, net, error in gather(store.list("fortigate"), lambda c: c.network()):
+            if error:
+                notes.append(f"{conn.name}: {error}")
+            else:
+                fws.append({"conn": conn.name, "host": conn.config.get("host", ""), "net": net})
+        for conn, net, error in gather(store.list("solarwinds"), lambda c: c.network()):
+            if error:
+                notes.append(f"{conn.name}: {error}")
+            else:
+                sws.append(net)
+        for conn in store.list("vsphere"):
+            try:
+                if conn.demo:
+                    with open_connector(conn) as c:
+                        vcs.append({"topo": netmap.build(c.network_raw()), "traffic": c.network_traffic()})
+                else:
+                    vcs.append({"topo": netmaps.topology(conn), "traffic": netmaps.traffic(conn)})
+            except (netmap.NetMapError, ConnectorError) as e:
+                notes.append(f"{conn.name}: {e}")
+        fs = flow_summary()
+        m = ecosystem.build(fws, sws, vcs, fs if (fs["enabled"] or fs.get("demo")) else None,
+                            flow_collector.settings()["zpa_connectors"])
+        m["notes"] = notes + m["notes"]
+        m["flows"] = {k: fs.get(k) for k in ("enabled", "listening", "error", "demo", "out_bps", "in_bps", "internal_bps", "exporters")}
+        return m
+
+    @app.get("/api/ecosystem/flows", dependencies=api)
+    def ecosystem_flows(minutes: int = 5):
+        return flow_summary(max(1, min(60, minutes)))
+
+    @app.get("/api/ecosystem/settings", dependencies=admin_only)
+    def ecosystem_settings():
+        return {**flow_collector.settings(), "listening": flow_collector.summary(1)["listening"], "error": flow_collector.error,
+                "addresses": sorted(this_computer_addresses() - {"127.0.0.1", "::1", "localhost"})}
+
+    @app.put("/api/ecosystem/settings", dependencies=admin_only)
+    def ecosystem_save_settings(body: dict, request: Request):
+        try:
+            flow_collector.save_settings(body)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, f"Check the settings: {e}") from e
+        audit(request, "Ecosystem: changed NetFlow settings", json.dumps({k: body[k] for k in body if k in ("enabled", "port", "internal", "zpa_connectors")}))
+        return ecosystem_settings()
 
     # --- iDRAC -------------------------------------------------------------
 

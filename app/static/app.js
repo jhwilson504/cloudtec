@@ -125,10 +125,10 @@ function connectionPicker(conns, selected, id) {
 
 const isAdmin = () => state.me?.role === "admin";
 
-const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers", solarwinds: "SolarWinds", vnx: "VNX storage" };
+const KIND_LABELS = { ad: "Active Directory", vsphere: "vCenter", idrac: "iDRAC servers", solarwinds: "SolarWinds", vnx: "VNX storage", fortigate: "FortiGate" };
 
 function noConnections(kind) {
-  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds server", vnx: "VNX Control Station" }[kind];
+  const label = { ad: "Active Directory domain", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds server", vnx: "VNX Control Station", fortigate: "FortiGate firewall" }[kind];
   const article = kind === "idrac" ? "an" : "a";
   if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a KasTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
@@ -305,6 +305,12 @@ async function renderDashboard() {
         <dt>Pool space used</dt><dd>${fmtBytes((s.capacity_gb - s.free_gb) * 1024 ** 3)} / ${fmtBytes(s.capacity_gb * 1024 ** 3)}</dd></dl>
         <div class="meter ${used > 85 ? "hot" : ""}"><div style="width:${used.toFixed(1)}%"></div></div>`;
     }
+    else if (i.kind === "fortigate") body = `<dl>
+        <dt>Firewall</dt><dd>${esc(s.hostname)} <span class="muted">${esc(s.model)}</span></dd>
+        <dt>FortiOS</dt><dd>${esc(s.version || "–")}</dd>
+        <dt>Internet links</dt><dd>${s.wan_links - s.wan_down} up / ${s.wan_links}${s.wan_down ? ` <span class="badge bad">${s.wan_down} down</span>` : ""}</dd>
+        <dt>Interfaces</dt><dd>${s.interfaces}</dd>
+        <dt>VPN tunnels</dt><dd>${s.tunnels}${s.tunnels_down ? ` <span class="badge bad">${s.tunnels_down} down</span>` : ""}</dd></dl>`;
     else if (i.kind === "idrac") body = `<dl>
         <dt>Servers</dt><dd>${s.reachable} reachable / ${s.servers}</dd>
         <dt>Healthy</dt><dd>${s.healthy}</dd>
@@ -320,7 +326,7 @@ async function renderDashboard() {
         <dt>Storage used</dt><dd>${fmtBytes(s.capacity - s.free_space)} / ${fmtBytes(s.capacity)}</dd></dl>
         <div class="meter ${used > 85 ? "hot" : ""}"><div style="width:${used.toFixed(1)}%"></div></div>`;
     }
-    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers", solarwinds: "#/solarwinds", vnx: "#/vnx" }[i.kind];
+    const link = { ad: "#/directory", vsphere: "#/vsphere", idrac: "#/servers", solarwinds: "#/solarwinds", vnx: "#/vnx", fortigate: "#/ecosystem" }[i.kind];
     return `<div class="card conn-card"><div class="head">
         <div><a class="link" href="${link}" data-pick="${i.kind}:${esc(i.id)}"><b>${esc(i.name)}</b></a>
           <div class="sub muted">${KIND_LABELS[i.kind]}${i.demo ? " · demo" : ""}</div></div>
@@ -370,7 +376,7 @@ async function renderDashboard() {
     <div class="act-ranks">
       <div class="card act-rank"><h3>Fullest datastores</h3><div id="dash-ds"><p class="muted">Loading…</p></div></div>
       ${actRanking("Needs attention", issues, (x) => `<li class="issue"><span class="act-dot ${x.cls === "bad" ? "unproductive" : x.cls === "warn" ? "neutral" : "undefined"}"></span><a class="link who" href="${x.link}">${esc(x.text)}</a><span class="badge ${x.cls}">${x.cls === "bad" ? "Problem" : x.cls === "warn" ? "Check" : "Info"}</span></li>`, "Nothing needs attention. 🎉")}
-      ${actRanking("Connections", items, (i) => `<li class="conn"><span class="kind">${esc({ ad: "AD", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds", vnx: "VNX" }[i.kind] || i.kind)}</span><span class="who">${esc(i.name)}${i.demo ? ' <span class="muted">demo</span>' : ""}</span>${i.error ? '<span class="badge bad">Unreachable</span>' : '<span class="badge ok">Online</span>'}</li>`, "No connections yet.")}
+      ${actRanking("Connections", items, (i) => `<li class="conn"><span class="kind">${esc({ ad: "AD", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds", vnx: "VNX", fortigate: "FortiGate" }[i.kind] || i.kind)}</span><span class="who">${esc(i.name)}${i.demo ? ' <span class="muted">demo</span>' : ""}</span>${i.error ? '<span class="badge bad">Unreachable</span>' : '<span class="badge ok">Online</span>'}</li>`, "No connections yet.")}
     </div>
     <h2 class="dash-sub">Connections & tools</h2>
     <div class="grid">${certTile(certs)}${cards}${resetTile()}${powershellTile()}</div>`;
@@ -1192,6 +1198,221 @@ function netTable(model) {
   const rows = model.edges.filter((e) => e.rate && (e.rate.rx || e.rate.tx)).sort((a, b) => (b.rate.rx + b.rate.tx) - (a.rate.rx + a.rate.tx)).slice(0, 15);
   $("#net-table").innerHTML = table(["From", "To", "Inbound", "Outbound"], rows.map((e) => `<tr><td>${esc(pos[e.from]?.label || e.from)}</td>
     <td>${esc(pos[e.to]?.label || e.to)}</td><td>${fmtBits(e.rate.rx)}</td><td>${fmtBits(e.rate.tx)}</td></tr>`), "No traffic reported yet.");
+}
+
+// ---- Ecosystem: the whole network, outside to inside, with live traffic --------------------
+
+const ECO_COL_X = 250, ECO_W = 214, ECO_H = 40, ECO_GAP = 10, ECO_TOP = 44;
+const ECO_KIND = { destination: "Outside destination", cloud: "Cloud service", isp: "Internet link", vpn: "VPN tunnel",
+  firewall: "Firewall", network: "Network", switch: "Switch", host: "ESXi host", zpa: "Zscaler ZPA connector" };
+
+async function renderEcosystem() {
+  loading();
+  clearInterval(state.ecoTimer);
+  const e = (state.eco ??= { live: true });
+  view.innerHTML = `<div class="page-head"><div><h1>Ecosystem</h1>
+      <p class="muted" style="margin:0">How everything connects, from the internet through the FortiGate and switches to the ESXi hosts, with live traffic
+        on every link. Built from the FortiGate, SolarWinds, vCenter and NetFlow. Read-only.</p></div>
+      <div class="row"><button class="btn" id="eco-live">${e.live ? "❚❚ Pause" : "▶ Live"}</button><button class="btn" id="eco-refresh">Refresh</button></div></div>
+    <div id="eco-body"><p class="muted">Reading the firewall, switches and vCenter… the first time can take a minute.</p></div>`;
+  $("#eco-live").onclick = () => { e.live = !e.live; $("#eco-live").textContent = e.live ? "❚❚ Pause" : "▶ Live"; $("#eco-wrap")?.classList.toggle("paused", !e.live); };
+  $("#eco-refresh").onclick = renderEcosystem;
+  let m, f;
+  try { [m, f] = await Promise.all([api("GET", "/api/ecosystem"), api("GET", "/api/ecosystem/flows")]); }
+  catch (err) { $("#eco-body").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
+  const box = $("#eco-body");
+  const kpi = (v, l, s = "") => `<div class="card act-kpi"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s muted small-note" style="margin:0">${s}</div>` : ""}</div>`;
+  const stats = () => { const s = m.summary; return kpi(fmtBits(s.outside_in), "From the internet now", f?.demo ? "demo NetFlow" : f?.listening ? "NetFlow" : "NetFlow off")
+    + kpi(fmtBits(s.outside_out), "To the internet now") + kpi(s.internet_links, "Internet links") + kpi(s.firewalls, "Firewalls")
+    + kpi(s.switches, "Switches") + kpi(s.hosts, "ESXi hosts") + kpi(s.problems, "Problems", s.problems ? "links or devices down" : "everything up"); };
+  box.innerHTML = `${m.notes.map((n) => `<div class="notice" style="margin-bottom:8px">${esc(n)}</div>`).join("")}
+    <div class="act-kpis" id="eco-stats">${stats()}</div>
+    <div class="card net-card"><div class="net-legend">
+        <span><svg width="34" height="10"><line x1="2" y1="5" x2="30" y2="5" class="lane in" marker-end="url(#eco-arrow-in)"/></svg>Inbound (toward the servers)</span>
+        <span><svg width="34" height="10"><line x1="30" y1="5" x2="4" y2="5" class="lane out" marker-end="url(#eco-arrow-out)"/></svg>Outbound (toward the internet)</span>
+        <span class="muted">Thicker and faster = more traffic · dashed = tunnel · red = down · hover anything for details</span></div>
+      <div class="net-scroll"><div class="net-wrap eco-wrap" id="eco-wrap"></div></div></div>
+    <div class="section"><div class="row" style="justify-content:space-between"><h2 style="margin:0">Where traffic goes outside the network</h2>
+      <span class="muted small-note" style="margin:0">${f?.demo ? "Demo data. " : ""}Last ${f?.minutes || 5} minutes from NetFlow${f?.exporters ? ` · ${Object.keys(f.exporters).length} exporter(s)` : ""}</span></div>
+      <div id="eco-dests" style="margin-top:10px"></div></div>
+    ${isAdmin() ? '<div class="card section" id="eco-settings"></div>' : ""}
+    <p class="muted small-note" id="eco-updated"></p>`;
+  const draw = () => { ecoRender($("#eco-wrap"), m); $("#eco-wrap").classList.toggle("paused", !e.live); };
+  const dests = () => {
+    $("#eco-dests").innerHTML = table(["Destination", "Provider", "Inbound", "Outbound", "Ports", "From inside"], (f?.destinations || []).map((d) => `<tr>
+      <td><b>${esc(d.name || d.ip)}</b>${d.name ? `<div class="sub mono">${esc(d.ip)}</div>` : ""}</td><td>${esc(d.provider || "–")}</td>
+      <td>${fmtBits(d.in_bps)}</td><td>${fmtBits(d.out_bps)}</td><td class="mono">${esc((d.ports || []).join(", "))}</td>
+      <td class="mono">${esc((d.inside || []).join(", "))}</td></tr>`), f?.enabled ? "No traffic leaving the network in the last few minutes (or the FortiGate isn't sending NetFlow yet)." : "NetFlow is off. Turn it on below.");
+  };
+  const stamp = () => { $("#eco-updated").textContent = `Updated ${new Date().toLocaleTimeString()} · refreshes every 20 seconds.`; };
+  draw(); dests(); stamp();
+  if (isAdmin()) ecoSettings($("#eco-settings"));
+  state.ecoTimer = setInterval(async () => {
+    if (!location.hash.startsWith("#/ecosystem") || !document.body.contains(box)) { clearInterval(state.ecoTimer); return; }
+    if (!e.live) return;
+    try {
+      const [m2, f2] = await Promise.all([api("GET", "/api/ecosystem"), api("GET", "/api/ecosystem/flows")]);
+      const same = m2.nodes.map((n) => n.id).join() === m.nodes.map((n) => n.id).join() && m2.links.length === m.links.length;
+      m = m2; f = f2;
+      if (same) ecoUpdate($("#eco-wrap"), m); else draw();
+      $("#eco-stats").innerHTML = stats(); dests(); stamp();
+    } catch { /* keep the last picture */ }
+  }, 20000);
+}
+
+function ecoRender(wrap, m) {
+  const cols = m.columns.length, W = cols * ECO_COL_X - (ECO_COL_X - ECO_W) + 40, step = ECO_H + ECO_GAP;
+  const byCol = m.columns.map((_, c) => m.nodes.filter((n) => n.col === c));
+  const pos = {};
+  byCol.forEach((list, c) => list.forEach((n, i) => { pos[n.id] = { x: 20 + c * ECO_COL_X, y: ECO_TOP + i * step, n }; }));
+  // Settle each box level with the middle of what it connects to (a few passes), without overlaps.
+  const nb = {};
+  for (const l of m.links) { (nb[l.a] ||= []).push(l.b); (nb[l.b] ||= []).push(l.a); }
+  for (let pass = 0; pass < 6; pass++) {
+    const order = pass % 2 ? [...byCol.keys()].reverse() : [...byCol.keys()];
+    for (const c of order) {
+      const want = byCol[c].map((n) => { const ys = (nb[n.id] || []).filter((id) => pos[id] && pos[id].n.col !== c).map((id) => pos[id].y);
+        return { n, y: ys.length ? ys.reduce((a, b) => a + b, 0) / ys.length : pos[n.id].y }; }).sort((a, b) => a.y - b.y);
+      let y = ECO_TOP - step;
+      for (const w of want) { y = Math.max(w.y, y + step); pos[w.n.id].y = y; }
+    }
+  }
+  const minY = Math.min(...Object.values(pos).map((p) => p.y));
+  for (const p of Object.values(pos)) p.y += ECO_TOP - minY;
+  const H = Math.max(300, ...Object.values(pos).map((p) => p.y + ECO_H)) + 24;
+  const curve = (a, b, dy) => {
+    if (a.n.col === b.n.col) {   // switches in the same column: an arc on the right
+      const x = a.x + ECO_W, y1 = a.y + ECO_H / 2 + dy, y2 = b.y + ECO_H / 2 + dy, bulge = 46 + Math.abs(y2 - y1) * 0.15;
+      return [`M${x},${y1} C${x + bulge},${y1} ${x + bulge},${y2} ${x},${y2}`, `M${x},${y2} C${x + bulge},${y2} ${x + bulge},${y1} ${x},${y1}`];
+    }
+    const [l, r] = a.x < b.x ? [a, b] : [b, a];
+    const x1 = l.x + ECO_W, y1 = l.y + ECO_H / 2 + dy, x2 = r.x, y2 = r.y + ECO_H / 2 + dy, mx = (x1 + x2) / 2;
+    return [`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, `M${x2},${y2} C${mx},${y2} ${mx},${y1} ${x1},${y1}`];
+  };
+  let edges = "";
+  m.links.forEach((l, i) => {
+    const a = pos[l.a], b = pos[l.b];
+    if (!a || !b) return;
+    const [fwd] = curve(a, b, -2), [, back] = curve(a, b, 2);
+    edges += `<g class="edge ${l.status === "down" ? "down" : l.status === "warn" ? "warn" : ""} ${l.kind}" data-i="${i}" data-from="${esc(l.a)}" data-to="${esc(l.b)}">
+      <path class="base" d="${curve(a, b, 0)[0]}"/>
+      ${l.rate ? `<path class="lane in" d="${fwd}" marker-end="url(#eco-arrow-in)"/><path class="lane out" d="${back}" marker-end="url(#eco-arrow-out)"/>` : ""}
+      <path class="hit" d="${curve(a, b, 0)[0]}"/></g>`;
+  });
+  const nodes = Object.values(pos).map(({ x, y, n }) => `<g class="node eco-${n.kind} st-${n.status}" data-id="${esc(n.id)}" transform="translate(${x},${y})">
+      <rect width="${ECO_W}" height="${ECO_H}" rx="9"/><rect class="tag" width="4" height="${ECO_H - 14}" x="7" y="7" rx="2"/>
+      <text x="18" y="17" class="t">${esc(n.label.length > 27 ? n.label.slice(0, 26) + "…" : n.label)}</text>
+      <text x="18" y="31" class="s">${esc((n.sub || "").slice(0, 34))}</text></g>`).join("");
+  const heads = m.columns.map((t, c) => `<text class="colhead" x="${20 + c * ECO_COL_X}" y="22">${esc(t)}</text>`).join("");
+  wrap.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" class="net-svg eco-svg" role="img" aria-label="Network ecosystem with live traffic">
+    <defs><marker id="eco-arrow-in" viewBox="0 0 6 6" refX="5" refY="3" markerUnits="userSpaceOnUse" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="arrow in"/></marker>
+      <marker id="eco-arrow-out" viewBox="0 0 6 6" refX="5" refY="3" markerUnits="userSpaceOnUse" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="arrow out"/></marker></defs>
+    ${heads}<g class="edges">${edges}</g><g class="nodes">${nodes}</g></svg><div class="act-tip net-tip hidden"></div>`;
+  // Inbound lanes must run left to right: if a link was given right-to-left, swap its lanes.
+  wrap.querySelectorAll(".edge").forEach((g) => {
+    const l = m.links[g.dataset.i], a = pos[l.a], b = pos[l.b];
+    g.dataset.flip = a && b && a.x > b.x ? "1" : "";
+  });
+  ecoUpdate(wrap, m);
+  ecoWire(wrap, m, pos);
+}
+
+function ecoUpdate(wrap, m) {
+  wrap.querySelectorAll(".edge").forEach((g) => {
+    const l = m.links[g.dataset.i];
+    if (!l?.rate) return;
+    const flip = g.dataset.flip === "1";
+    for (const [cls, bps] of [["in", flip ? l.rate.out : l.rate.in], ["out", flip ? l.rate.in : l.rate.out]]) {
+      const lane = g.querySelector(`.lane.${cls}`), st = laneStyle(bps);
+      if (!lane) continue;
+      lane.style.strokeWidth = st.w; lane.style.animationDuration = `${st.dur}s`; lane.classList.toggle("idle", !st.w);
+    }
+  });
+}
+
+function ecoWire(wrap, m, pos) {
+  const tip = wrap.querySelector(".net-tip"), svg = wrap.querySelector("svg");
+  const show = (html, evt) => {
+    tip.innerHTML = html; tip.classList.remove("hidden");
+    const b = wrap.getBoundingClientRect();
+    tip.style.left = `${Math.min(evt.clientX - b.left + 14, b.width - 300)}px`; tip.style.top = `${evt.clientY - b.top + 14}px`;
+  };
+  const hide = () => { tip.classList.add("hidden"); svg.classList.remove("focus"); svg.querySelectorAll(".lit").forEach((x) => x.classList.remove("lit")); };
+  const rateLines = (r, speed) => (r ? `<div><span class="lane-key in"></span>In<span>${fmtBits(r.in)}${speed ? ` · ${(r.in / speed * 100).toFixed(1)}%` : ""}</span></div>
+    <div><span class="lane-key out"></span>Out<span>${fmtBits(r.out)}${speed ? ` · ${(r.out / speed * 100).toFixed(1)}%` : ""}</span></div>` : '<div class="muted">No traffic figures for this link</div>');
+  svg.querySelectorAll(".node").forEach((g) => {
+    g.addEventListener("mousemove", (evt) => {
+      const n = pos[g.dataset.id].n, d = n.details || {};
+      svg.classList.add("focus"); g.classList.add("lit");
+      svg.querySelectorAll(".edge").forEach((eg) => { if (eg.dataset.from === n.id || eg.dataset.to === n.id) { eg.classList.add("lit");
+        svg.querySelector(`.node[data-id="${CSS.escape(eg.dataset.from === n.id ? eg.dataset.to : eg.dataset.from)}"]`)?.classList.add("lit"); } });
+      const extra = [
+        d.address && `Address ${d.address}`, d.interface && `Interface ${d.interface}`, d.gateway && `Gateway ${d.gateway}`,
+        d.peer && `Peer ${d.peer}`, d.serial && `Serial ${d.serial}`, d.vendor && d.vendor, d.fqdn && d.fqdn,
+        ...(d.subnets || []), ...(d.destinations || []).map((x) => `${x.name || x.ip}${x.ports?.length ? ` (${x.ports.join(", ")})` : ""}`),
+      ].filter(Boolean);
+      show(`<b>${esc(n.label)}</b><div class="muted">${esc(ECO_KIND[n.kind] || n.kind)}${n.sub ? ` · ${esc(n.sub)}` : ""}</div>
+        ${extra.map((x) => `<div class="muted">${esc(x)}</div>`).join("")}
+        ${n.status !== "ok" ? `<div><span class="badge ${n.status === "down" ? "bad" : n.status === "warn" ? "warn" : "plain"}">${n.status === "down" ? "Down" : n.status === "warn" ? "Degraded" : "Status unknown"}</span></div>` : ""}`, evt);
+    });
+    g.addEventListener("mouseleave", hide);
+  });
+  svg.querySelectorAll(".edge .hit").forEach((h) => {
+    h.addEventListener("mousemove", (evt) => {
+      const g = h.parentNode, l = m.links[g.dataset.i];
+      svg.classList.add("focus"); g.classList.add("lit");
+      const name = (id) => pos[id]?.n.label || id;
+      show(`<b>${esc(name(l.a))} ↔ ${esc(name(l.b))}</b>${l.label ? `<div class="muted">${esc(l.label)}</div>` : ""}
+        ${l.speed ? `<div class="muted">Link speed ${fmtBits(l.speed)}</div>` : ""}${l.status === "down" ? '<div class="muted">Link down</div>' : ""}
+        ${rateLines(l.rate, l.speed)}`, evt);
+    });
+    h.addEventListener("mouseleave", hide);
+  });
+}
+
+async function ecoSettings(card) {
+  let s;
+  try { s = await api("GET", "/api/ecosystem/settings"); } catch (err) { card.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
+  const addr = s.addresses[0] || "<KasTec server IP>";
+  card.innerHTML = `<h2>NetFlow and Zscaler</h2>
+    <form id="eco-form" class="form" autocomplete="off">
+      <label class="inline full"><input type="checkbox" name="enabled" ${s.enabled ? "checked" : ""}> <b>Collect NetFlow</b> so the map shows where traffic goes outside the network
+        ${s.enabled ? (s.listening ? '<span class="badge ok">listening</span>' : '<span class="badge bad">not listening</span>') : ""}</label>
+      <label>UDP port <input name="port" type="number" min="1" max="65535" value="${s.port}"></label>
+      <label>ZPA connector VMs (names in vCenter) <input name="zpa" value="${esc(s.zpa_connectors.join(", "))}" placeholder="ZSCALERAPP001, BSPDRPZPACON02"></label>
+      <label class="full">Also treat these ranges as inside (besides 10/8, 172.16/12, 192.168/16 and Zscaler's 100.64/10)
+        <input name="internal" value="${esc(s.internal.join(", "))}" placeholder="e.g. your public range 196.x.x.0/24"></label>
+      ${s.error ? `<div class="full notice bad">${esc(s.error)}</div>` : ""}
+      <div class="full" id="eco-msg"></div>
+      <div class="full"><button class="btn primary">Save</button></div>
+    </form>
+    <details style="margin-top:12px"><summary><b>Point the FortiGate's NetFlow at KasTec</b></summary>
+      <p class="muted small-note">In the FortiGate CLI (FortiOS 7.2.8 and later; on older versions put <code>set collector-ip</code> and <code>set collector-port</code> directly under <code>config system netflow</code>):</p>
+      <pre class="gr-out">config system netflow
+    config collectors
+        edit 1
+            set collector-ip ${esc(addr)}
+            set collector-port ${s.port}
+        next
+    end
+end
+config system interface
+    edit "wan1"
+        set netflow-sampler both
+    next
+end</pre>
+      <p class="muted small-note">Repeat the interface part for each internet (WAN) interface. Then allow UDP ${s.port} in to the KasTec server's Windows Firewall
+        (in an Administrator PowerShell: <code>New-NetFirewallRule -DisplayName "KasTec NetFlow" -Direction Inbound -Protocol UDP -LocalPort ${s.port} -Action Allow</code>).
+        This works best with KasTec on a server next to the FortiGate. KasTec computer's addresses: ${s.addresses.map(esc).join(", ") || "unknown"}.</p></details>`;
+  const fm = $("#eco-form");
+  fm.onsubmit = async (ev) => {
+    ev.preventDefault();
+    const list = (v) => v.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
+    try {
+      await api("PUT", "/api/ecosystem/settings", { enabled: fm.enabled.checked, port: Number(fm.port.value), zpa_connectors: list(fm.zpa.value), internal: list(fm.internal.value) });
+      toast("Saved"); ecoSettings(card);
+    } catch (err) { $("#eco-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+  };
 }
 
 // ---- vSphere -------------------------------------------------------------
@@ -2623,7 +2844,7 @@ async function renderConnections() {
     <div class="card section">
       <div class="row" style="justify-content:space-between;margin-bottom:14px">
         <h2 style="margin:0">Add a connection</h2>
-        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button><button data-k="solarwinds">SolarWinds</button><button data-k="vnx">VNX</button></div>
+        <div class="segmented" id="kind"><button data-k="ad">Active Directory</button><button data-k="vsphere">vCenter</button><button data-k="idrac">iDRAC</button><button data-k="solarwinds">SolarWinds</button><button data-k="vnx">VNX</button><button data-k="fortigate">FortiGate</button></div>
       </div>
       <form id="conn-form" class="form" autocomplete="off"></form>
     </div>`;
@@ -2665,26 +2886,29 @@ async function renderConnections() {
 
   function drawForm() {
     kindBtns.forEach((b) => b.classList.toggle("active", b.dataset.k === state.connKind));
-    const ad = state.connKind === "ad", idrac = state.connKind === "idrac", sw = state.connKind === "solarwinds", vnx = state.connKind === "vnx";
+    const ad = state.connKind === "ad", idrac = state.connKind === "idrac", sw = state.connKind === "solarwinds", vnx = state.connKind === "vnx", fg = state.connKind === "fortigate";
     const where = idrac
       ? `<label class="full"><span>iDRAC addresses, one per line (they must all use the account below)</span>
           <textarea name="hosts" rows="4" spellcheck="false" placeholder="10.0.10.11
 10.0.10.12"></textarea></label>`
-      : `<label>${ad ? "Domain controller" : sw ? "SolarWinds server" : vnx ? "Control Station (the address you open in PuTTY)" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : sw ? "btc-sw-app.btcbahamas.com" : vnx ? "10.0.16.50 or vnx-cs.btcbahamas.com" : "vcenter.corp.example.com"}"></label>
+      : `<label>${ad ? "Domain controller" : sw ? "SolarWinds server" : vnx ? "Control Station (the address you open in PuTTY)" : fg ? "FortiGate management address" : "vCenter host"} <input name="host" placeholder="${ad ? "dc01.corp.example.com" : sw ? "btc-sw-app.btcbahamas.com" : vnx ? "10.0.16.50 or vnx-cs.btcbahamas.com" : fg ? "10.0.19.250" : "vcenter.corp.example.com"}"></label>
       <label>Port <input name="port" type="number" placeholder="${ad ? "636" : sw ? "17774" : vnx ? "22" : "443"}"></label>`;
     $("#conn-form").innerHTML = `
-      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : sw ? "SolarWinds" : vnx ? "JFK VNX" : "Production vCenter"}"></label>
+      <label class="full">Display name <input name="name" required placeholder="${ad ? "corp.example.com" : idrac ? "Rack A servers" : sw ? "SolarWinds" : vnx ? "JFK VNX" : fg ? "BTC edge firewall" : "Production vCenter"}"></label>
       ${where}
       ${ad ? `<label class="full">Base DN <input name="base_dn" placeholder="DC=corp,DC=example,DC=com"></label>
         <label>Bind account <input name="bind_user" placeholder="svc-cloudtec@corp.example.com"></label>`
+           : fg ? '<label>VDOM <input name="vdom" placeholder="root"></label>'
            : `<label>Username <input name="username" placeholder="${idrac ? "root, or a read-only iDRAC user" : sw ? "a SolarWinds web console account (read-only is enough)" : vnx ? "nasadmin (the account you use in PuTTY)" : "administrator@vsphere.local"}"></label>`}
-      <label>Password <input name="password" type="password" autocomplete="new-password"></label>
+      <label>${fg ? "REST API token" : "Password"} <input name="password" type="password" autocomplete="new-password"></label>
+      ${fg ? `<p class="full muted small-note" style="margin:0">On the FortiGate: System → Administrators → Create New → REST API Admin, with a read-only profile
+        and this KasTec server's address as a trusted host. Paste the token it shows once. KasTec only reads: interfaces, routes and VPN tunnels.</p>` : ""}
       ${vnx ? `<label>SP A name <input name="sp_a" placeholder="spa"></label><label>SP B name <input name="sp_b" placeholder="spb"></label>
         <label class="full">SSH key fingerprint (optional) <input name="host_key" placeholder="SHA256:… (leave empty: KasTec saves it on the first connection)"></label>
         <p class="full muted small-note" style="margin:0">KasTec signs in with PuTTY's plink, as you do in PuTTY, and only runs commands that read information. It saves the password encrypted and signs in by itself every time.</p>` : ""}
       <div class="full row" style="gap:20px">
         ${ad ? '<label class="inline"><input type="checkbox" name="use_ssl" checked> Use LDAPS (required for password resets)</label>' : ""}
-        <label class="inline ${vnx ? "hidden" : ""}"><input type="checkbox" name="verify_ssl" ${idrac || sw ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : sw ? " (SolarWinds' API uses its own self-signed certificate unless you replaced it)" : ""}</label>
+        <label class="inline ${vnx ? "hidden" : ""}"><input type="checkbox" name="verify_ssl" ${idrac || sw || fg ? "" : "checked"}> Verify certificate${idrac ? " (leave unticked if the iDRACs still have their own self-signed certificate)" : sw ? " (SolarWinds' API uses its own self-signed certificate unless you replaced it)" : ""}</label>
         <label class="inline"><input type="checkbox" name="demo"> Demo mode (sample data, no server needed)</label>
       </div>
       <div class="full" id="form-msg"></div>
@@ -2693,12 +2917,12 @@ async function renderConnections() {
     const form = $("#conn-form");
     form.demo.onchange = () => {
       form.querySelectorAll("input:not([name=demo]):not([name=name]), textarea").forEach((el) => el.disabled = form.demo.checked);
-      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : sw ? "Demo SolarWinds" : vnx ? "Demo VNX" : "Demo vCenter";
+      if (form.demo.checked && !form.name.value) form.name.value = ad ? "Demo domain" : idrac ? "Demo servers" : sw ? "Demo SolarWinds" : vnx ? "Demo VNX" : fg ? "Demo FortiGate" : "Demo vCenter";
     };
     const body = () => {
       const f = new FormData(form);
       const config = {};
-      for (const key of ["host", "port", "base_dn", "bind_user", "username", "sp_a", "sp_b", "host_key"]) {
+      for (const key of ["host", "port", "base_dn", "bind_user", "username", "sp_a", "sp_b", "host_key", "vdom"]) {
         const v = (f.get(key) || "").trim();
         if (v) config[key] = key === "port" ? Number(v) : v;
       }
@@ -3381,6 +3605,7 @@ const routes = {
   solarwinds: renderSolarWinds,
   vnx: renderVNX,
   activity: renderActivity,
+  ecosystem: renderEcosystem,
   crosscheck: renderCrosscheck,
   connections: renderConnections,
   powershell: renderShell,
