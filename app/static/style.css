@@ -93,7 +93,8 @@ nav a {
 nav a:hover { background: var(--panel-2); }
 nav a.active { background: var(--accent); color: var(--accent-text); }
 main { flex: 1; min-width: 0; }
-.topbar { padding: 14px 28px; border-bottom: 1px solid var(--border); background: var(--panel); }
+.topbar { padding: 14px 28px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; align-items: center; gap: 12px; }
+.topbar .search { flex: 1; }
 #view { padding: 24px 28px 48px; max-width: 1400px; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
 
@@ -462,3 +463,14 @@ body.popout .term { height: calc(100vh - 150px); }
   white-space: pre-wrap; font: 12.5px/1.45 Consolas, "Cascadia Mono", Menlo, monospace; margin: 10px 0 0; }
 .gr-out.bad { color: #ff9a9a; }
 .ssh-term { background: #0b1220; padding: 8px; border-radius: 10px; overflow-x: auto; }
+
+/* Full screen (the whole app) */
+.fs-toggle { margin-left: auto; white-space: nowrap; }
+.fs-exit { position: fixed; top: 12px; right: 14px; z-index: 50; width: 38px; height: 38px; border-radius: 50%;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 17px; line-height: 1; cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25); opacity: .75; transition: opacity .15s; }
+.fs-exit:hover, .fs-exit:focus-visible { opacity: 1; outline: 2px solid var(--accent); }
+body.app-full .fs-toggle { display: none; }
+body.app-full .topbar { padding-right: 64px; }
+body.popout .fs-toggle { display: none; }
+@media print { .fs-toggle, .fs-exit { display: none !important; } }

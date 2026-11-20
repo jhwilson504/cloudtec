@@ -222,6 +222,28 @@ $("#login-form").addEventListener("submit", async (e) => {
   }
 });
 
+// Full screen for the whole of KasTec: hides the browser's tabs and address bar. Esc (the browser's own key),
+// the ✕ in the corner, or the button again leaves it.
+function syncFullscreen() {
+  const app = document.fullscreenElement === document.documentElement;
+  document.body.classList.toggle("app-full", app);
+  $("#fs-exit").classList.toggle("hidden", !app);
+  $("#fs-toggle").textContent = app ? "✕ Exit full screen" : "⛶ Full screen";
+}
+async function toggleAppFullscreen() {
+  try {
+    if (document.fullscreenElement === document.documentElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen({ navigationUI: "hide" });
+  } catch { toast("This browser wouldn't switch to full screen. Press F11 instead.", true); }
+}
+if (document.fullscreenEnabled) {
+  $("#fs-toggle").addEventListener("click", toggleAppFullscreen);
+  $("#fs-exit").addEventListener("click", () => document.exitFullscreen().catch(() => {}));
+  document.addEventListener("fullscreenchange", syncFullscreen);
+} else {
+  $("#fs-toggle").classList.add("hidden");   // e.g. inside a frame that doesn't allow it
+}
+
 // Theme: Auto (follow Windows), Light or Dark, remembered in this browser.
 function setTheme(choice, save = true) {
   if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
@@ -3144,7 +3166,7 @@ async function renderShell(arg) {
   const wrap = $("#term-wrap");
   const toggleFull = async () => {
     try {
-      if (document.fullscreenElement) await document.exitFullscreen();
+      if (document.fullscreenElement === wrap) await document.exitFullscreen();
       else await wrap.requestFullscreen();
     } catch { toast("This browser wouldn't switch to full screen.", true); }
     input.focus();
@@ -3153,7 +3175,7 @@ async function renderShell(arg) {
   $("#sh-full-exit").onclick = toggleFull;
   document.onfullscreenchange = () => {
     const btn = $("#sh-full");
-    if (btn) btn.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen ⛶";
+    if (btn) btn.textContent = document.fullscreenElement === wrap ? "Exit full screen" : "Full screen ⛶";
     term.scrollTop = term.scrollHeight;
   };
 
