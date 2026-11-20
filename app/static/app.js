@@ -1217,10 +1217,12 @@ async function renderEcosystem() {
     <div id="eco-body"><p class="muted">Reading the firewall, switches and vCenter… the first time can take a minute.</p></div>`;
   $("#eco-live").onclick = () => { e.live = !e.live; $("#eco-live").textContent = e.live ? "❚❚ Pause" : "▶ Live"; $("#eco-wrap")?.classList.toggle("paused", !e.live); };
   $("#eco-refresh").onclick = renderEcosystem;
+  const box = $("#eco-body"), token = state.ecoSeq = (state.ecoSeq || 0) + 1;
+  const stale = () => token !== state.ecoSeq || !box.isConnected;   // refreshed again, or another page is showing now
   let m, f;
   try { [m, f] = await Promise.all([api("GET", "/api/ecosystem"), api("GET", "/api/ecosystem/flows")]); }
-  catch (err) { $("#eco-body").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
-  const box = $("#eco-body");
+  catch (err) { if (!stale()) box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
+  if (stale()) return;
   const kpi = (v, l, s = "") => `<div class="card act-kpi"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s muted small-note" style="margin:0">${s}</div>` : ""}</div>`;
   const stats = () => { const s = m.summary; return kpi(fmtBits(s.outside_in), "From the internet now", f?.demo ? "demo NetFlow" : f?.listening ? "NetFlow" : "NetFlow off")
     + kpi(fmtBits(s.outside_out), "To the internet now") + (s.internet_links ? kpi(s.internet_links, "Internet links") : "")
@@ -3630,11 +3632,24 @@ async function route() {
   }
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === name));
   view.dataset.page = routes[name] ? name : "dashboard";  // lets a page have its own styles (e.g. the bolder dashboard)
+  // A page that was still loading when you moved on (say a slow Dashboard) can finish later and draw over the page
+  // you're on now. Each visit gets a number: a late page never shows its errors, and if it drew over the current
+  // page, the current page is drawn again.
+  const seq = state.routeSeq = (state.routeSeq || 0) + 1;
+  state.clobbered = false;
+  let error = null;
   try {
     await (routes[name] ?? renderDashboard)(arg);
   } catch (err) {
-    view.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
+    error = err;
   }
+  if (seq !== state.routeSeq) {
+    if (state.routeDone === state.routeSeq) route(); else state.clobbered = true;
+    return;
+  }
+  state.routeDone = seq;
+  if (state.clobbered) route();
+  else if (error) view.innerHTML = `<div class="notice bad">${esc(error.message)}</div>`;
 }
 
 function start() {
