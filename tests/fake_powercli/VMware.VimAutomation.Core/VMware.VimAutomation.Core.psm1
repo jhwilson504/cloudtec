@@ -69,7 +69,10 @@ function Get-View {
       $dv.Connectable = New-Object VMware.Vim.NicConnectable; $dv.Connectable.Connected = $false
       $disk = New-Object VMware.Vim.VirtualDisk
       o @{ Name = 'BTCPRODDC1'; Runtime = (o @{ Host = (o @{ Value = 'host-10' }); PowerState = 'poweredOn' })
-        Config = (o @{ Template = $false; Hardware = (o @{ Device = @($disk, $std) }) }) }
+        Config = (o @{ Template = $false; Hardware = (o @{ Device = @($disk, $std) }) })
+        Guest = (o @{ Net = @((o @{ MacAddress = '00:50:56:aa:00:01'; Network = 'VCMS-Only'
+                                     IpConfig = (o @{ IpAddress = @((o @{ IpAddress = '10.0.16.20'; PrefixLength = 22 }), (o @{ IpAddress = 'fe80::1'; PrefixLength = 64 })) }) }))
+                     IpStack = @((o @{ IpRouteConfig = (o @{ IpRoute = @((o @{ Network = '0.0.0.0'; PrefixLength = 0; Gateway = (o @{ IpAddress = '10.0.16.1' }) })) }) })) }) }
       o @{ Name = 'APP02'; Runtime = (o @{ Host = (o @{ Value = 'host-10' }); PowerState = 'poweredOff' })
         Config = (o @{ Template = $false; Hardware = (o @{ Device = @($dv) }) }) }
       o @{ Name = '%2fvmfs%2fvolumes%2f5793c116%2fPELATROTEST_03'; Runtime = (o @{ Host = $null; PowerState = 'poweredOff' })

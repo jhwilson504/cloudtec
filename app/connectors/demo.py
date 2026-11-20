@@ -367,7 +367,17 @@ class DemoVSphere:
                     nics.append({"dvportgroup": "dvportgroup-22", "connected": power == "POWERED_ON"})
             else:
                 nics = [{"network": "VM Network", "connected": power == "POWERED_ON"}]
-            vms.append({"name": v["name"], "host": host, "power": {"POWERED_ON": "poweredOn"}.get(power, "poweredOff"), "nics": nics})
+            # What VMware Tools would report: an address per network card and the default gateway.
+            subnet = {"dvportgroup-21": "10.50.241", "dvportgroup-22": "10.0.16"}
+            addrs, gateway = [], None
+            if power == "POWERED_ON":
+                for k, n in enumerate(nics):
+                    base = subnet.get(n.get("dvportgroup"), "10.0.11")
+                    addrs.append({"network": n.get("network"),
+                                  "ips": [f"{base}.{20 + (len(vms) * 7 + k) % 200}/{22 if base == '10.0.16' else 24}"]})
+                gateway = f"{subnet.get(nics[0].get('dvportgroup'), '10.0.11')}.1"
+            vms.append({"name": v["name"], "host": host, "power": {"POWERED_ON": "poweredOn"}.get(power, "poweredOff"), "nics": nics,
+                        "addrs": addrs, "gateway": gateway})
         return {"vcenter": "vcenter.lab.local", "hosts": hosts, "dvportgroups": dvpgs, "vms": vms}
 
     def network_traffic(self, now: float | None = None) -> dict:
@@ -594,7 +604,24 @@ class DemoSolarWinds:
                            {"InterfaceID": ib, "NodeID": b, "Name": bi, "Caption": bi, "Speed": speed * 1e6, "InBps": rx, "OutBps": tx, "Status": 1}]
             links.append({"SrcNodeID": a, "SrcInterfaceID": ia, "DestNodeID": b, "DestInterfaceID": ib, "LayerType": "L2"})
             links.append({"SrcNodeID": b, "SrcInterfaceID": ib, "DestNodeID": a, "DestInterfaceID": ia, "LayerType": "L2"})
-        return build_network(nodes, interfaces, links)
+        # The firewall's internet links and inside networks, as SolarWinds sees them over SNMP.
+        fw_ports = [("wan1", "ISP-A Fibre", 1000, 128, 1, "203.0.113.10", "255.255.255.248"),
+                    ("wan2", "ISP-B Backup", 100, 0, 2, "198.51.100.2", "255.255.255.252"),
+                    ("port3", None, 10000, None, 3, "10.50.241.1", "255.255.255.0"),
+                    ("port4", None, 10000, None, 4, "10.0.16.1", "255.255.252.0"),
+                    ("port5", "ESB", 1000, 20, 5, "10.0.11.1", "255.255.255.0")]
+        ips = []
+        for k, (name, alias, speed, mbps, idx, ip, mask) in enumerate(fw_ports):
+            ips.append({"NodeID": 201, "IPAddress": ip, "SubnetMask": mask, "InterfaceIndex": idx})
+            existing = next((i for i in interfaces if i["NodeID"] == 201 and i["Name"] == name), None)
+            if existing:
+                existing["Index"] = idx
+                continue
+            wave = 1 + 0.4 * math.sin(t * 1.3 + k)
+            interfaces.append({"InterfaceID": 900 + k, "NodeID": 201, "Name": name, "Caption": f"{name} · {alias}" if alias else name,
+                               "Speed": speed * 1e6, "InBps": mbps * 1e6 * wave, "OutBps": mbps * 0.33e6 * (2 - wave),
+                               "Status": 2 if not mbps and name == "wan2" else 1, "Index": idx})
+        return build_network(nodes, interfaces, links, ips)
 
 
 # --- VNX: a fake Control Station, so the real parser runs on realistic naviseccli output -----------

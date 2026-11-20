@@ -1223,7 +1223,9 @@ async function renderEcosystem() {
   const box = $("#eco-body");
   const kpi = (v, l, s = "") => `<div class="card act-kpi"><div class="v">${v}</div><div class="l">${l}</div>${s ? `<div class="s muted small-note" style="margin:0">${s}</div>` : ""}</div>`;
   const stats = () => { const s = m.summary; return kpi(fmtBits(s.outside_in), "From the internet now", f?.demo ? "demo NetFlow" : f?.listening ? "NetFlow" : "NetFlow off")
-    + kpi(fmtBits(s.outside_out), "To the internet now") + kpi(s.internet_links, "Internet links") + kpi(s.firewalls, "Firewalls")
+    + kpi(fmtBits(s.outside_out), "To the internet now") + (s.internet_links ? kpi(s.internet_links, "Internet links") : "")
+    + (s.firewalls ? kpi(s.firewalls, "Firewalls") : "")
+    + kpi(s.networks, "Networks (IP)")
     + kpi(s.switches, "Switches") + kpi(s.hosts, "ESXi hosts") + kpi(s.problems, "Problems", s.problems ? "links or devices down" : "everything up"); };
   box.innerHTML = `${m.notes.map((n) => `<div class="notice" style="margin-bottom:8px">${esc(n)}</div>`).join("")}
     <div class="act-kpis" id="eco-stats">${stats()}</div>

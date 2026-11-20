@@ -66,3 +66,37 @@ def test_netflow_settings(client):
     assert client.put("/api/ecosystem/settings", json={"internal": ["not a network"]}).status_code == 422
     s = client.put("/api/ecosystem/settings", json={"internal": ["196.32.0.0/16"], "zpa_connectors": ["ZSCALERAPP001", " "]}).json()
     assert s["internal"] == ["196.32.0.0/16"] and s["zpa_connectors"] == ["ZSCALERAPP001"]
+
+
+def test_vcenter_only_shows_networks_and_gateways(client):
+    """No FortiGate or SolarWinds: networks by IP and their gateways come from VMware Tools on the VMs."""
+    assert client.post("/api/connections", json={"kind": "vsphere", "name": "Demo vCenter", "demo": True}).status_code == 201
+    m = client.get("/api/ecosystem").json()
+    nodes = {n["id"]: n for n in m["nodes"]}
+    links = {(l["a"], l["b"]): l for l in m["links"]}
+    gw = nodes["fw:gateways"]
+    assert gw["col"] == 2 and "10.50.241.1 for 10.50.241.0/24" in gw["details"]["subnets"]
+    net = nodes["net:vc|10.50.241.0/24"]
+    assert net["col"] == 3 and net["label"] == "Servers-VLAN20 (VLAN 20)" and "VM(s)" in net["sub"]
+    assert links[("fw:gateways", "net:vc|10.50.241.0/24")]["rate"]["in"] > 0
+    assert ("net:vc|10.50.241.0/24", "cdp:sw-core-01") in links and nodes["cdp:sw-core-01"]["col"] == 4
+    assert ("isp:internet", "fw:gateways") in links
+    assert m["summary"]["firewalls"] == 0 and m["summary"]["networks"] == 3
+    assert any("VMware Tools" in n for n in m["notes"]) and not any(n.startswith("Add SolarWinds") for n in m["notes"])
+
+
+def test_firewall_from_solarwinds_when_no_fortigate(client):
+    for kind, name in (("solarwinds", "Demo SolarWinds"), ("vsphere", "Demo vCenter")):
+        assert client.post("/api/connections", json={"kind": kind, "name": name, "demo": True}).status_code == 201
+    m = client.get("/api/ecosystem").json()
+    nodes = {n["id"]: n for n in m["nodes"]}
+    links = {(l["a"], l["b"]): l for l in m["links"]}
+    fw = nodes["fw:sw0|201"]
+    assert fw["label"] == "FGT-EDGE-01" and "via SolarWinds" in fw["sub"]
+    assert nodes["isp:sw0|201|wan1"]["label"] == "ISP-A Fibre" and nodes["isp:sw0|201|wan1"]["sub"] == "203.0.113.10/29"
+    assert nodes["isp:sw0|201|wan2"]["status"] == "down"
+    assert nodes["net:sw0|201|port3"]["sub"] == "10.50.241.0/24"
+    assert links[("isp:sw0|201|wan1", "fw:sw0|201")]["rate"]["in"] > 0
+    core = [n for n in m["nodes"] if n["label"] == "SW-CORE-01" and n["kind"] == "switch"][0]
+    assert ("net:sw0|201|port3", core["id"]) in links
+    assert "fw:gateways" not in nodes and m["summary"]["firewalls"] == 1 and m["summary"]["internet_links"] == 2

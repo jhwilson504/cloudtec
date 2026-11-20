@@ -104,9 +104,19 @@ foreach ($h in L (Get-View -Server $vi -ViewType HostSystem -Property Name, Pare
   }
 }
 $vms = @()
-foreach ($v in L (Get-View -Server $vi -ViewType VirtualMachine -Property Name, Runtime.Host, Runtime.PowerState, Config.Template, Config.Hardware.Device)) {
+foreach ($v in L (Get-View -Server $vi -ViewType VirtualMachine -Property Name, Runtime.Host, Runtime.PowerState, Config.Template, Config.Hardware.Device, Guest.Net, Guest.IpStack)) {
   if ($v.Config.Template) { continue }
-  $vms += [ordered]@{ name = $v.Name; host = (K $hostNames $v.Runtime.Host.Value); power = "$($v.Runtime.PowerState)"
+  # What VMware Tools reports: the VM's IPv4 addresses (per network card) and its default gateway.
+  $addrs = @(); $gw = $null
+  try {
+    foreach ($gn in L $v.Guest.Net) {
+      $ips = @(foreach ($a in L $gn.IpConfig.IpAddress) { if ("$($a.IpAddress)" -match '^\d+\.\d+\.\d+\.\d+$') { "$($a.IpAddress)/$($a.PrefixLength)" } })
+      if ($ips.Count) { $addrs += [ordered]@{ mac = $gn.MacAddress; network = $gn.Network; ips = $ips } }
+    }
+    foreach ($st in L $v.Guest.IpStack) { foreach ($r in L $st.IpRouteConfig.IpRoute) {
+      if (-not $gw -and "$($r.Network)" -eq '0.0.0.0' -and $r.PrefixLength -eq 0 -and $r.Gateway.IpAddress) { $gw = "$($r.Gateway.IpAddress)" } } }
+  } catch {}
+  $vms += [ordered]@{ name = $v.Name; host = (K $hostNames $v.Runtime.Host.Value); power = "$($v.Runtime.PowerState)"; addrs = $addrs; gateway = $gw
     nics = @(foreach ($n in L $v.Config.Hardware.Device) { if ($n -is [VMware.Vim.VirtualEthernetCard]) {
       [ordered]@{ network = $n.Backing.DeviceName; dvportgroup = $n.Backing.Port.PortgroupKey; connected = [bool]$n.Connectable.Connected; mac = $n.MacAddress } } }) }
 }
@@ -246,9 +256,17 @@ def build(raw: dict) -> dict:
                 pg = f"dvpg:{n['dvportgroup']}"
             else:
                 pg = next((pid for pid in portgroups if pid.startswith(f"std:{cluster}|") and pid.endswith(f"|{n.get('network')}")), None)
-            nics.append({"portgroup": pg, "connected": bool(n.get("connected")), "mac": n.get("mac")})
+            nics.append({"portgroup": pg, "connected": bool(n.get("connected")), "mac": n.get("mac"), "ips": []})
+        addrs = [a for a in _list(v.get("addrs")) if isinstance(a, dict)]
+        for i, a in enumerate(addrs):   # match the guest's addresses to the card by MAC, else by network name, else by position
+            mac = (a.get("mac") or "").lower()
+            nic = (next((x for x in nics if mac and (x["mac"] or "").lower() == mac), None)
+                   or next((x for x, n in zip(nics, _list(v.get("nics"))) if a.get("network") and n.get("network") == a.get("network")), None)
+                   or (nics[min(i, len(nics) - 1)] if nics else None))
+            if nic is not None:
+                nic["ips"] += [ip for ip in _list(a.get("ips")) if isinstance(ip, str)]
         vms.append({"id": f"vm:{v['name']}", "name": v["name"], "host": v.get("host"), "cluster": cluster,
-                    "power": v.get("power"), "nics": nics})
+                    "power": v.get("power"), "nics": nics, "gateway": v.get("gateway") or None})
     return {"vcenter": raw.get("vcenter"), "hosts": hosts, "uplinks": uplinks, "physical": list(physical.values()),
             "switches": list(switches.values()), "portgroups": list(portgroups.values()), "vms": vms, "vmks": vmks,
             "clusters": sorted({h["cluster"] for h in hosts})}

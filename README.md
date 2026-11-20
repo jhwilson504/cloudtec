@@ -161,6 +161,10 @@ shows addresses, link speed and utilisation. It refreshes every 20 seconds and i
   with a **read-only** profile and the KasTec server's address as a trusted host, and paste its token as the password.
 - **SolarWinds**: switches and how they're cabled together (needs NPM's topology), with interface traffic.
 - **vCenter**: which switch each ESXi host plugs into (CDP on the host uplinks).
+- **With only vCenter** (no FortiGate or SolarWinds access), the map still works: KasTec reads each VM's IP
+  addresses and default gateway from VMware Tools, so it shows your networks by IP (with their port groups and
+  VLANs), the gateway addresses the VMs use, the physical switches the hosts report, and the VMs' live traffic.
+  If SolarWinds monitors the firewall, the firewall and its internet links are drawn from SolarWinds instead.
 - **NetFlow** (optional): where traffic goes outside the network. An admin turns it on at the bottom of the
   Ecosystem page; the page shows the FortiGate CLI to point NetFlow at KasTec (UDP 2055). Allow that port in on the
   KasTec server: `New-NetFirewallRule -DisplayName "KasTec NetFlow" -Direction Inbound -Protocol UDP -LocalPort 2055 -Action Allow`.

@@ -77,7 +77,9 @@ def test_scripts_against_fake_powercli(monkeypatch):
         assert "TEMPLATE-W2022" not in vms
         orphan = vms["%2fvmfs%2fvolumes%2f5793c116%2fPELATROTEST_03"]       # a VM vCenter has no host for
         assert orphan["host"] is None and orphan["nics"] == []
-        assert vms["BTCPRODDC1"]["nics"] == [{"portgroup": "std:JFK|vSwitch0|VCMS-Only", "connected": True, "mac": "00:50:56:aa:00:01"}]
+        assert vms["BTCPRODDC1"]["nics"] == [{"portgroup": "std:JFK|vSwitch0|VCMS-Only", "connected": True, "mac": "00:50:56:aa:00:01",
+                                              "ips": ["10.0.16.20/22"]}]
+        assert vms["BTCPRODDC1"]["gateway"] == "10.0.16.1"
         assert vms["APP02"]["nics"][0]["portgroup"] == "dvpg:dvportgroup-5" and not vms["APP02"]["nics"][0]["connected"]
         vmk = {v["name"]: v for v in m["vmks"]}
         assert vmk["vmk0"]["services"] == ["management"] and vmk["vmk1"]["portgroup"] == "dvpg:dvportgroup-5"

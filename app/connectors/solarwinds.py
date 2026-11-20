@@ -10,6 +10,7 @@ Config keys:
 The connection secret is the password.
 """
 
+import ipaddress
 import httpx
 
 from .base import ConnectorError
@@ -41,14 +42,24 @@ INTERFACES_DOWN = ("SELECT I.InterfaceID, I.Caption, I.Status, I.StatusDescripti
 
 
 NET_NODES = "SELECT NodeID, Caption, IPAddress, Vendor, MachineType, Category, Status FROM Orion.Nodes"
-NET_INTERFACES = ("SELECT InterfaceID, NodeID, Caption, Name, Speed, InBps, OutBps, InPercentUtil, OutPercentUtil, Status "
-                  "FROM Orion.NPM.Interfaces")
+NET_INTERFACES = ("SELECT InterfaceID, NodeID, Caption, Name, Speed, InBps, OutBps, InPercentUtil, OutPercentUtil, Status, "
+                  "Index FROM Orion.NPM.Interfaces")
+NET_IPS = "SELECT NodeID, IPAddress, SubnetMask, InterfaceIndex FROM Orion.NodeIPAddresses"
 NET_TOPOLOGY = "SELECT SrcNodeID, SrcInterfaceID, DestNodeID, DestInterfaceID, LayerType FROM Orion.TopologyConnections"
 CATEGORY = {1: "network", 2: "server"}
 
 
-def build_network(nodes: list[dict], interfaces: list[dict] | None, links: list[dict] | None) -> dict:
-    """Network devices, their interfaces with live traffic, and which interface connects to which (each link once)."""
+def build_network(nodes: list[dict], interfaces: list[dict] | None, links: list[dict] | None,
+                  ips: list[dict] | None = None) -> dict:
+    """Network devices, their interfaces with live traffic and addresses, and which interface connects to which (each link once)."""
+    addrs: dict = {}
+    for a in ips or []:
+        try:
+            cidr = ipaddress.ip_interface(f"{a.get('IPAddress')}/{a.get('SubnetMask')}")
+        except ValueError:
+            continue
+        if cidr.version == 4 and not cidr.ip.is_loopback:
+            addrs.setdefault((a.get("NodeID"), a.get("InterfaceIndex")), []).append(str(cidr))
     out_nodes = [{"id": n.get("NodeID"), "name": n.get("Caption"), "ip": n.get("IPAddress"), "vendor": n.get("Vendor"),
                   "model": n.get("MachineType"), "category": CATEGORY.get(int(n.get("Category") or 0), "other"),
                   "status": status_group(n.get("Status"))} for n in nodes]
@@ -57,7 +68,8 @@ def build_network(nodes: list[dict], interfaces: list[dict] | None, links: list[
         ifs[i.get("InterfaceID")] = {"id": i.get("InterfaceID"), "node": i.get("NodeID"), "name": i.get("Name") or i.get("Caption"),
                                      "caption": i.get("Caption"), "speed": _num(i.get("Speed")), "status": status_group(i.get("Status")),
                                      "rx": _num(i.get("InBps")), "tx": _num(i.get("OutBps")),
-                                     "in_util": _num(i.get("InPercentUtil")), "out_util": _num(i.get("OutPercentUtil"))}
+                                     "in_util": _num(i.get("InPercentUtil")), "out_util": _num(i.get("OutPercentUtil")),
+                                     "ips": addrs.get((i.get("NodeID"), i.get("Index")), [])}
     seen, out_links = set(), []
     for c in links or []:
         a, b = (c.get("SrcNodeID"), c.get("SrcInterfaceID")), (c.get("DestNodeID"), c.get("DestInterfaceID"))
@@ -201,12 +213,19 @@ class SolarWindsConnector:
         try:
             interfaces = self.query(NET_INTERFACES)
         except ConnectorError:
-            interfaces = None
+            try:   # older NPM without the Index column
+                interfaces = self.query(NET_INTERFACES.replace(", Index ", " "))
+            except ConnectorError:
+                interfaces = None
+        try:
+            ips = self.query(NET_IPS)
+        except ConnectorError:
+            ips = None
         try:
             links = self.query(NET_TOPOLOGY)
         except ConnectorError:
             links = None
-        return build_network(nodes, interfaces, links)
+        return build_network(nodes, interfaces, links, ips)
 
 
 def _num(value):

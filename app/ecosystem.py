@@ -14,6 +14,7 @@ Every link carries traffic both ways: "in" flows toward the inside (left to righ
 
 from __future__ import annotations
 
+import ipaddress
 import re
 
 COLUMNS = ["Outside the network", "Internet links & VPN", "Firewall", "Networks (IP)", "Core switches",
@@ -28,6 +29,108 @@ def norm(name: str | None) -> str:
 
 def _rate(rx=0.0, tx=0.0):
     return {"in": float(rx or 0), "out": float(tx or 0)}
+
+
+FIREWALL_WORDS = ("fortinet", "fortigate", "palo alto", "sonicwall", "check point", "checkpoint", "watchguard", "asa", "firepower")
+WAN_WORDS = re.compile(r"wan|internet|isp|outside|untrust|external", re.I)
+
+
+def is_firewall(d: dict) -> bool:
+    text = f" {d.get('vendor') or ''} {d.get('model') or ''} ".lower()
+    return any(re.search(rf"\b{w}\b", text) for w in FIREWALL_WORDS) or bool(re.match(r"(fgt|fw)[-_]", (d.get("name") or "").lower()))
+
+
+def _firewall_from_solarwinds(fid, k, d, ifaces, node, link, primary_wan):
+    """A firewall SolarWinds monitors: its internet-facing interfaces and its inside networks (by IP)."""
+    st = {"up": "ok", "down": "down", "warning": "warn"}.get(d["status"], "unknown")
+    wans = [i for i in ifaces if WAN_WORDS.search(f"{i['name']} {i.get('caption') or ''}")]
+    node(fid, 2, "firewall", d["name"], " · ".join(x for x in [d.get("model") or d.get("vendor"), "via SolarWinds"] if x),
+         "warn" if st == "ok" and any(i["status"] == "down" for i in wans) else st, address=d.get("ip"), vendor=d.get("vendor"))
+    for i in ifaces:
+        down = i["status"] == "down"
+        if i in wans:
+            iid = f"isp:sw{k}|{d['id']}|{i['name']}"
+            label = (i.get("caption") or i["name"]).split(" · ")[-1]
+            node(iid, 1, "isp", label, ", ".join(i["ips"]) or i["name"], "down" if down else "ok", interface=i["name"])
+            # What the firewall receives on an internet port came in from the internet.
+            link(iid, fid, _rate(i["rx"], i["tx"]), i["speed"], "down" if down else "ok", label=i["name"])
+            busy = (i["rx"] or 0) + (i["tx"] or 0)
+            if not down and (primary_wan is None or busy > primary_wan[1]):
+                primary_wan = (iid, busy)
+        elif i["ips"]:
+            nid = f"net:sw{k}|{d['id']}|{i['name']}"
+            nets = [str(ipaddress.ip_interface(a).network) for a in i["ips"]]
+            node(nid, 3, "network", (i.get("caption") or i["name"]).split(" · ")[-1], ", ".join(nets),
+                 "down" if down else "ok", interface=i["name"], address=", ".join(i["ips"]))
+            link(fid, nid, _rate(i["tx"], i["rx"]), i["speed"], "down" if down else "ok", label=i["name"])
+    return primary_wan
+
+
+def _networks_from_vcenter(vcs, nodes, node, link, sw_by_name):
+    """No firewall connected: networks by IP and their gateways, from what VMware Tools reports on each VM."""
+    nets: dict = {}
+    for vc in vcs:
+        topo, traffic = vc["topo"], vc.get("traffic") or {"vms": {}}
+        pgs = {p["id"]: p for p in topo["portgroups"]}
+        host_sw: dict = {}
+        for u in topo["uplinks"]:
+            sid = sw_by_name.get(norm(u.get("physical"))) if u.get("physical") else None
+            if sid:
+                host_sw.setdefault(u["host"], set()).add(sid)
+        for v in topo["vms"]:
+            r = traffic["vms"].get(v["name"]) or {}
+            with_ip = [n for n in v["nics"] if n.get("ips")]
+            for n in with_ip:
+                for ip in n["ips"]:
+                    try:
+                        net = ipaddress.ip_interface(ip).network
+                    except ValueError:
+                        continue
+                    if net.prefixlen == 32 or net.is_link_local:
+                        continue
+                    e = nets.setdefault(str(net), {"pgs": set(), "vms": set(), "gws": {}, "rx": 0.0, "tx": 0.0, "sw": {}, "hosts": {}})
+                    if n.get("portgroup") in pgs:
+                        p = pgs[n["portgroup"]]
+                        e["pgs"].add(p["name"] + (f" (VLAN {p['vlan']})" if p.get("vlan") not in (None, "", "0") else ""))
+                    if v["name"] not in e["vms"]:
+                        e["vms"].add(v["name"])
+                        share = 1 / len(with_ip)   # a VM on two networks: split its traffic between them
+                        rx, tx = r.get("rx", 0) * share, r.get("tx", 0) * share
+                        e["rx"] += rx
+                        e["tx"] += tx
+                        sws = host_sw.get(v.get("host")) or set()
+                        for sid in sws:
+                            t = e["sw"].setdefault(sid, [0.0, 0.0])
+                            t[0] += rx / len(sws)
+                            t[1] += tx / len(sws)
+                        if not sws and v.get("host"):
+                            t = e["hosts"].setdefault(v["host"], [0.0, 0.0])
+                            t[0] += rx
+                            t[1] += tx
+                    gw = v.get("gateway")
+                    if gw:
+                        try:
+                            if ipaddress.ip_address(gw) in net:
+                                e["gws"][gw] = e["gws"].get(gw, 0) + 1
+                        except ValueError:
+                            pass
+    if not nets:
+        return
+    gateways = {net: max(e["gws"], key=e["gws"].get) for net, e in nets.items() if e["gws"]}
+    node("fw:gateways", 2, "firewall", "Firewall / router", f"{len(set(gateways.values()))} gateway address(es), from the VMs",
+         "unknown", subnets=[f"{g} for {n}" for n, g in sorted(gateways.items())])
+    link("isp:internet", "fw:gateways", None, None, "ok", label="the way out to the internet")
+    for net, e in sorted(nets.items(), key=lambda kv: ipaddress.ip_network(kv[0])):
+        nid = f"net:vc|{net}"
+        label = ", ".join(sorted(e["pgs"])) or net
+        node(nid, 3, "network", label, f"{net} · {len(e['vms'])} VM(s)", "ok",
+             address=f"gateway {gateways[net]}" if net in gateways else "no gateway reported")
+        link("fw:gateways", nid, _rate(e["rx"], e["tx"]), None, "ok" if net in gateways else "unknown",
+             label=f"via {gateways.get(net, 'unknown gateway')} · traffic of the VMs in this network")
+        for sid, (rx, tx) in e["sw"].items():
+            link(nid, sid, _rate(rx, tx), None, label=f"{net} through this switch")
+        for h, (rx, tx) in e["hosts"].items():
+            link(nid, f"host:{h}", _rate(rx, tx), None, label=f"{net} on this host")
 
 
 def build(fws: list[dict], sws: list[dict], vcs: list[dict], flows: dict | None, zpa_names: list[str]) -> dict:
@@ -79,8 +182,6 @@ def build(fws: list[dict], sws: list[dict], vcs: list[dict], flows: dict | None,
             r = t.get("rate") or {}
             node(tid, 1, "vpn", t["name"], f"IPsec to {t['peer']}", "ok" if t["up"] else "down", peer=t["peer"], subnets=t["subnets"])
             link(tid, fid, _rate(r.get("rx"), r.get("tx")) if r else None, None, "ok" if t["up"] else "down", kind="tunnel")
-    if not fws:
-        notes.append("Add your FortiGate on the Connections page to show the firewall, its internet links and networks.")
 
     # --- switches (SolarWinds) ---------------------------------------------------------------
     sw_by_name = {}
@@ -91,6 +192,11 @@ def build(fws: list[dict], sws: list[dict], vcs: list[dict], flows: dict | None,
             fid = fw_by_ip.get((d.get("ip") or "").lower()) or fw_by_ip.get((d.get("name") or "").lower())
             if fid:
                 firewalls[d["id"]] = fid
+            elif not fws and is_firewall(d):
+                # No firewall connection: draw it from what SolarWinds sees over SNMP.
+                fid = firewalls[d["id"]] = f"fw:sw{k}|{d['id']}"
+                primary_wan = _firewall_from_solarwinds(fid, k, d, [i for i in ifs.values() if i["node"] == d["id"]],
+                                                        node, link, primary_wan)
         devices = {d["id"]: d for d in sw["nodes"] if d["category"] == "network" and d["id"] not in firewalls}
         adj: dict = {}
         for l in sw["links"]:
@@ -153,7 +259,7 @@ def build(fws: list[dict], sws: list[dict], vcs: list[dict], flows: dict | None,
             sid = sw_by_name.get(norm(u["physical"]))
             if not sid:
                 sid = f"cdp:{norm(u['physical'])}"
-                node(sid, 5, "switch", u["physical"].split("(")[0], "seen by the ESXi hosts (CDP/LLDP)", "unknown")
+                node(sid, 5 if sws else 4, "switch", u["physical"].split("(")[0], "seen by the ESXi hosts (CDP/LLDP)", "unknown")
                 sw_by_name[norm(u["physical"])] = sid
             p = pairs.setdefault((sid, u["host"]), {"rx": 0.0, "tx": 0.0, "speed": 0, "ports": [], "up": 0, "n": 0})
             r = traffic["uplinks"].get(u["id"]) or {}
@@ -169,6 +275,20 @@ def build(fws: list[dict], sws: list[dict], vcs: list[dict], flows: dict | None,
         for v in topo["vms"]:
             if v["name"].lower() in zpa:
                 zpa_vms[v["name"].lower()] = (v, traffic["vms"].get(v["name"]))
+    no_firewall = not any(n["kind"] == "firewall" for n in nodes.values())
+    if no_firewall and vcs:
+        node("isp:internet", 1, "isp", "Internet", "no firewall connected", "unknown")
+        _networks_from_vcenter(vcs, nodes, node, link, sw_by_name)
+    if not any(n["kind"] == "firewall" for n in nodes.values()):
+        notes.append("No firewall found: add your FortiGate on the Connections page, or have SolarWinds monitor it, "
+                     "to show the firewall, its internet links and networks.")
+    elif "fw:gateways" in nodes:
+        notes.append("Without the FortiGate or SolarWinds, the networks and gateways come from vCenter (what VMware Tools reports "
+                     "on each VM), and traffic is the VMs' own traffic. A read-only FortiGate API token or SolarWinds access from "
+                     "your network team would add the internet links and the switches in between.")
+    elif not fws:
+        notes.append("The firewall is drawn from SolarWinds. Adding the FortiGate itself (a read-only API token from your network "
+                     "team) would also show its routes and VPN tunnels.")
     if not vcs:
         notes.append("Add your vCenter (and PowerCLI on the KasTec computer) to show the ESXi hosts and which switch ports they use.")
 
@@ -217,9 +337,12 @@ def build(fws: list[dict], sws: list[dict], vcs: list[dict], flows: dict | None,
             link("zscaler", zid, _rate((r or {}).get("rx"), (r or {}).get("tx")) if r else None, None,
                  "ok" if vm and vm.get("power") == "poweredOn" else "unknown", kind="tunnel", label="ZPA tunnel")
 
+    if "fw:gateways" in nodes:   # the vCenter note already says what SolarWinds would add
+        notes[:] = [n for n in notes if not n.startswith("Add SolarWinds")]
     summary = {
         "outside_in": flows.get("in_bps") if flows else None, "outside_out": flows.get("out_bps") if flows else None,
-        "firewalls": sum(1 for n in nodes.values() if n["kind"] == "firewall"),
+        "firewalls": sum(1 for n in nodes.values() if n["kind"] == "firewall" and n["id"] != "fw:gateways"),
+        "networks": sum(1 for n in nodes.values() if n["kind"] == "network"),
         "internet_links": sum(1 for n in nodes.values() if n["kind"] == "isp" and n["id"] != "isp:internet"),
         "switches": sum(1 for n in nodes.values() if n["kind"] == "switch"),
         "hosts": sum(1 for n in nodes.values() if n["kind"] == "host"),
