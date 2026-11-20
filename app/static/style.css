@@ -95,7 +95,7 @@ nav a.active { background: var(--accent); color: var(--accent-text); }
 main { flex: 1; min-width: 0; }
 .topbar { padding: 14px 28px; border-bottom: 1px solid var(--border); background: var(--panel); display: flex; align-items: center; gap: 12px; }
 .topbar .search { flex: 1; }
-#view { padding: 24px 28px 48px; max-width: 1400px; }
+#view { padding: 24px 28px 48px; }
 .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; margin-bottom: 18px; flex-wrap: wrap; }
 
 /* controls */
