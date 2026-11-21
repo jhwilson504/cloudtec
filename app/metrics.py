@@ -38,21 +38,34 @@ def totals(items: list[dict]) -> dict:
                              if t["storage_capacity"] else None)
     t["problems"] = (t["connections_down"] + t["sw_down"] + t["vnx_faults"] + t["servers_attention"]
                      + (t["hosts"] - t["hosts_connected"]))
-    # Health: the average of each area's share that's fine.
+    # Health: the average of each area's share that's fine. Each part says why it isn't 100% and where to look.
     parts = []
+
+    def part(label, good, total, detail, link):
+        parts.append({"label": label, "pct": round(good / total * 100, 1), "detail": detail, "link": link, "_v": good / total})
+
     if t["connections"]:
-        parts.append(("Connections answering", (t["connections"] - t["connections_down"]) / t["connections"]))
+        part("Connections answering", t["connections"] - t["connections_down"], t["connections"],
+             f"{t['connections_down']} of {t['connections']} not answering" if t["connections_down"] else f"all {t['connections']} answering",
+             "#/connections")
     if t["hosts"]:
-        parts.append(("ESXi hosts connected", t["hosts_connected"] / t["hosts"]))
+        down = t["hosts"] - t["hosts_connected"]
+        part("ESXi hosts connected", t["hosts_connected"], t["hosts"],
+             f"{down} of {t['hosts']} hosts not connected" if down else f"all {t['hosts']} hosts connected", "#/vsphere")
     if t["sw_nodes"]:
-        parts.append(("SolarWinds nodes up", (t["sw_nodes"] - t["sw_down"]) / t["sw_nodes"]))
+        part("SolarWinds nodes up", t["sw_nodes"] - t["sw_down"], t["sw_nodes"],
+             f"{t['sw_down']} of {t['sw_nodes']} nodes down" if t["sw_down"] else f"all {t['sw_nodes']} nodes up", "#/solarwinds")
     if t["servers"]:
-        parts.append(("Servers healthy (iDRAC)", (t["servers"] - t["servers_attention"]) / t["servers"]))
+        part("Servers healthy (iDRAC)", t["servers"] - t["servers_attention"], t["servers"],
+             f"{t['servers_attention']} of {t['servers']} servers need attention" if t["servers_attention"]
+             else f"all {t['servers']} servers healthy", "#/servers")
     arrays = [i for i in ok if i["kind"] == "vnx"]
     if arrays:
-        parts.append(("VNX arrays without faults", sum(1 for i in arrays if i["summary"].get("faults_ok")) / len(arrays)))
-    t["health_pct"] = round(sum(v for _, v in parts) / len(parts) * 100, 1) if parts else None
-    t["health_parts"] = [{"label": label, "pct": round(v * 100, 1)} for label, v in parts]
+        good = sum(1 for i in arrays if i["summary"].get("faults_ok"))
+        part("VNX arrays without faults", good, len(arrays),
+             f"{t['vnx_faults']} fault(s) on {len(arrays) - good} array(s)" if good < len(arrays) else "no faults", "#/vnx")
+    t["health_pct"] = round(sum(p["_v"] for p in parts) / len(parts) * 100, 1) if parts else None
+    t["health_parts"] = [{k: v for k, v in p.items() if k != "_v"} for p in parts]
     return t
 
 

@@ -319,3 +319,9 @@ def test_solarwinds_status_by_short_name(client):
     assert s["connections"] == 2
     assert s["nodes"]["bspdrpcfdns02"]["group"] == "down" and s["nodes"]["btcproddc1"]["group"] == "up"
     assert [e["connection"] for e in s["errors"]] == ["offline"]           # one down doesn't hide the other
+
+
+def test_status_bar(client):
+    add_demo(client, "ad", "Corp")
+    s = client.get("/api/status").json()
+    assert s["version"] and s["connections"][0]["ok"] and s["connections"][0]["ms"] > 0 and s["connections"][0]["port"] == 636

@@ -37,6 +37,8 @@ log = logging.getLogger("cloudtec")
 STATIC = Path(__file__).parent / "static"
 
 # Settings that are safe to store and return, per connection kind.
+APP_VERSION = "2026.11"
+
 CONFIG_FIELDS = {
     "ad": ("host", "port", "use_ssl", "verify_ssl", "base_dn", "bind_user"),
     "vsphere": ("host", "port", "verify_ssl", "username"),
@@ -827,6 +829,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return ipaddress.ip_address(ip) in ipaddress.ip_network("100.64.0.0/10")
         except ValueError:
             return False
+
+    status_cache: dict = {"at": 0.0, "data": None}
+    DEFAULT_PORTS = {"vsphere": 443, "idrac": 443, "solarwinds": 17774, "vnx": 22, "fortigate": 443}
+
+    def reach(conn: Connection) -> dict:
+        """How long a plain TCP connection to the connection's server takes (no sign-in; a few milliseconds)."""
+        cfg = conn.config
+        host = (cfg.get("hosts") or [None])[0] if conn.kind == "idrac" else cfg.get("host")
+        if conn.kind == "ad":
+            port = int(cfg.get("port") or (636 if cfg.get("use_ssl", True) else 389))
+        else:
+            port = int(cfg.get("port") or DEFAULT_PORTS.get(conn.kind, 443))
+        out = {"id": conn.id, "name": conn.name, "kind": conn.kind, "demo": conn.demo, "host": host, "port": port}
+        if conn.demo:
+            return {**out, "ok": True, "ms": round(2 + (sum(map(ord, conn.id)) % 14) + (time.time() % 3), 1)}
+        if not host:
+            return {**out, "ok": False, "ms": None}
+        t0 = time.perf_counter()
+        ok = port_open(host, port, timeout=2)
+        return {**out, "ok": ok, "ms": round((time.perf_counter() - t0) * 1000, 1) if ok else None}
+
+    @app.get("/api/status", dependencies=api)
+    def status_bar():
+        """For the status bar: each connection's response time, checked at most every 20 seconds."""
+        now = time.time()
+        if status_cache["data"] is None or now - status_cache["at"] > 20:
+            conns = store.list()
+            with ThreadPoolExecutor(max_workers=max(1, min(16, len(conns)))) as pool:
+                status_cache["data"] = list(pool.map(reach, conns))
+            status_cache["at"] = now
+        return {"connections": status_cache["data"], "checked": status_cache["at"], "version": APP_VERSION}
 
     def ipv4_of(host: str) -> str | None:
         try:

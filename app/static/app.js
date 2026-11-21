@@ -309,6 +309,55 @@ function setNavCollapsed(on, save = true) {
 try { setNavCollapsed(localStorage.getItem("kastec-nav") === "collapsed", false); } catch (e) { setNavCollapsed(false, false); }
 $("#nav-collapse").addEventListener("click", () => setNavCollapsed(!document.body.classList.contains("nav-collapsed")));
 
+// Status bar: every connection with how fast its server answers, refreshed every 30 seconds.
+const KIND_SHORT = { ad: "AD", vsphere: "vCenter", idrac: "iDRAC", solarwinds: "SolarWinds", vnx: "VNX", fortigate: "FortiGate" };
+async function drawStatusBar() {
+  const bar = $("#statusbar");
+  if (!state.me) return;
+  let s;
+  try { s = await api("GET", "/api/status"); } catch { bar.innerHTML = '<span class="sb-item bad"><span class="sb-dot"></span>KasTec not answering</span>'; return; }
+  const items = s.connections.map((c) => {
+    const cls = !c.ok ? "bad" : c.ms > 150 ? "warn" : "ok";
+    const where = c.demo ? "demo" : c.host ? `${c.host}:${c.port}` : "no address";
+    return `<span class="sb-item ${cls}" title="${esc(`${c.name} (${KIND_SHORT[c.kind] || c.kind}), ${where}: ${c.ok ? `answered in ${c.ms} ms` : "not answering"}`)}">
+      <span class="sb-dot"></span>${esc(KIND_SHORT[c.kind] || c.kind)} <span class="sb-name">${esc(c.name)}</span>
+      <span class="sb-ms">${c.ok ? `${Math.round(c.ms)} ms` : "down"}</span></span>`;
+  }).join("");
+  bar.innerHTML = `<div class="sb-conns">${items || '<span class="muted">No connections yet</span>'}</div>
+    <span class="sb-meta" title="Response times are a plain network connection to each server, checked every 20–30 seconds">
+      Checked ${new Date(s.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
+    <span class="sb-meta">KasTec ${esc(s.version)}</span>`;
+}
+setInterval(() => { if (state.me && !document.hidden) drawStatusBar(); }, 30000);
+
+// Copy: point at any address, host name or other technical value and a copy button appears beside it.
+(() => {
+  const btn = $("#copy-btn");
+  let target = null, hideT;
+  const textOf = (el) => (el.dataset.copy || el.childNodes[0]?.textContent || el.textContent).trim();
+  document.addEventListener("mouseover", (e) => {
+    const el = e.target.closest?.("#view .mono, #view .sub.mono, #view td.mono, #view [data-copy]");
+    if (el && !el.closest("pre, .xterm, .term, svg, button, a.btn, input, textarea") && textOf(el)) {
+      clearTimeout(hideT); target = el;
+      const r = el.getBoundingClientRect();
+      btn.style.left = `${Math.min(innerWidth - 30, r.left + Math.min(r.width, el.scrollWidth) + 4)}px`;
+      btn.style.top = `${r.top + r.height / 2 - 11}px`;
+      btn.innerHTML = icon("copy"); btn.classList.remove("hidden", "done");
+    } else if (e.target !== btn && !btn.contains(e.target)) {
+      clearTimeout(hideT); hideT = setTimeout(() => btn.classList.add("hidden"), 250);
+    }
+  });
+  window.addEventListener("scroll", () => btn.classList.add("hidden"), true);
+  btn.addEventListener("click", async () => {
+    if (!target) return;
+    const text = textOf(target);
+    try { await navigator.clipboard.writeText(text); }
+    catch { const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t); t.select(); document.execCommand("copy"); t.remove(); }
+    btn.innerHTML = icon("check"); btn.classList.add("done");
+    toast(`Copied ${text.length > 60 ? text.slice(0, 57) + "…" : text}`);
+  });
+})();
+
 // Command palette (Ctrl+K): jump to any page, run an action, or search everything.
 const palette = { items: [], sel: 0 };
 function paletteItems(q) {
@@ -520,7 +569,10 @@ async function renderDashboard() {
     <div class="act-row">
       <div class="card act-gauge-card"><h3>Infrastructure health</h3>${dashGauge(t.health_pct, level)}
         <p style="text-align:center;margin:0 0 6px"><span class="badge ${level}">${levelText}</span></p>
-        <dl class="act-mini">${(t.health_parts || []).map((p) => `<dt>${esc(p.label)}</dt><dd>${p.pct}%</dd>`).join("")}</dl></div>
+        <div class="health-parts">${(t.health_parts || []).map((p) => `<a class="hp ${p.pct >= 100 ? "full" : p.pct >= 80 ? "warn" : "bad"}" href="${esc(p.link || "#/dashboard")}" title="${esc(p.detail || "")}">
+          <span class="hp-l">${esc(p.label)}</span><span class="hp-v">${p.pct}%</span>
+          <span class="hp-bar"><span style="width:${Math.max(2, Math.min(100, p.pct))}%"></span></span>
+          ${p.pct < 100 ? `<span class="hp-why">${icon("chevron-right")}${esc(p.detail || "")}</span>` : ""}</a>`).join("")}</div></div>
       <div class="card dash-trend"><div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
           <h3 style="margin:0">Trend</h3>
           <div class="row" style="gap:8px;flex-wrap:wrap"><div class="segmented" id="dash-metric">${DASH_METRICS.map(([k, l]) => `<button data-m="${k}" class="${(state.dashMetric ||= "storage_used_pct") === k ? "active" : ""}">${l}</button>`).join("")}</div>
@@ -3821,6 +3873,7 @@ function start() {
   document.querySelectorAll("[data-admin]").forEach((el) => el.classList.toggle("hidden", !isAdmin()));
   $("#whoami-name").textContent = state.me.display_name || state.me.username;
   $("#whoami-role").textContent = ROLE_INFO[state.me.role]?.[0] ?? state.me.role;
+  drawStatusBar();
   const who = (state.me.display_name || state.me.username || "?").trim();
   $("#whoami-initials").textContent = who.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
   route();

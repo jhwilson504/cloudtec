@@ -724,3 +724,45 @@ a.card:hover, .act-kpi:hover, .stat:hover { border-color: var(--border-strong); 
 @media (prefers-reduced-motion: reduce) {
   #view > *, .toast, .toast .bar, .skel { animation: none !important; }
 }
+
+/* ---- Design pass 5: technical touches ---------------------------------------------------------- */
+/* Status bar along the bottom: each connection and how fast it answers. */
+main { display: flex; flex-direction: column; min-height: 100vh; }
+#view { flex: 1; }
+.statusbar { position: sticky; bottom: 0; z-index: 5; display: flex; align-items: center; gap: 16px; padding: 6px 28px;
+  border-top: 1px solid var(--border); background: color-mix(in srgb, var(--panel) 92%, transparent); backdrop-filter: blur(6px);
+  font-size: 11.5px; color: var(--muted); min-height: 30px; }
+.statusbar:empty { display: none; }
+.sb-conns { display: flex; gap: 14px; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.sb-item { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.sb-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--dot-ok); }
+.sb-item.warn .sb-dot { background: var(--warn); }
+.sb-item.bad .sb-dot { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 22%, transparent); }
+.sb-item.bad { color: var(--bad); }
+.sb-name { color: var(--text); opacity: .85; max-width: 180px; overflow: hidden; text-overflow: ellipsis; }
+.sb-ms { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.sb-meta { white-space: nowrap; font-family: var(--font-mono); font-size: 11px; }
+body.app-full .statusbar, body.popout .statusbar { display: none; }
+
+/* Copy button beside technical values. */
+.copy-btn { position: fixed; z-index: 40; width: 22px; height: 22px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  border: 1px solid var(--border-strong); border-radius: 6px; background: var(--panel); color: var(--muted);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, .12); }
+.copy-btn .ic { width: 13px; height: 13px; vertical-align: 0; }
+.copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+.copy-btn.done { color: var(--dot-ok); border-color: var(--dot-ok); }
+#view .mono { cursor: text; }
+
+/* Health score: each part as a bar, with what's pulling it down and a link to where to look. */
+.health-parts { display: grid; gap: 10px; margin-top: 6px; }
+.hp { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; text-decoration: none; color: var(--text); padding: 4px 6px;
+  margin: 0 -6px; border-radius: 8px; }
+.hp:hover { background: var(--panel-2); }
+.hp-l { font-size: 12.5px; color: var(--muted); } .hp:hover .hp-l { color: var(--text); }
+.hp-v { font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 600; }
+.hp-bar { grid-column: 1 / -1; height: 4px; border-radius: 4px; background: var(--panel-2); overflow: hidden; border: 1px solid var(--border); }
+.hp-bar span { display: block; height: 100%; background: var(--dot-ok); border-radius: 4px; }
+.hp.warn .hp-bar span { background: var(--warn); } .hp.bad .hp-bar span { background: var(--bad); }
+.hp.warn .hp-v { color: var(--warn); } .hp.bad .hp-v { color: var(--bad); }
+.hp-why { grid-column: 1 / -1; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+.hp-why .ic { width: 12px; height: 12px; vertical-align: 0; }

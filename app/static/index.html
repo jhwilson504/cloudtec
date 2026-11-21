@@ -77,6 +77,7 @@
         <button type="button" id="fs-toggle" class="btn fs-toggle" title="Full screen: hides the browser (Esc to leave)"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-maximize-2"/></svg><span>Full screen</span></button>
       </header>
       <section id="view"></section>
+      <footer class="statusbar" id="statusbar" aria-label="Connection status"></footer>
     </main>
   </div>
 
@@ -93,6 +94,7 @@
     </div>
   </div>
   <div id="toast" class="toast hidden"></div>
+  <button type="button" id="copy-btn" class="copy-btn hidden" title="Copy" aria-label="Copy"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-copy"/></svg></button>
   <button type="button" id="fs-exit" class="fs-exit hidden" title="Exit full screen (Esc)" aria-label="Exit full screen"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-x"/></svg></button>
 
   <script src="/static/app.js"></script>

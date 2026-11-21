@@ -26,6 +26,7 @@ def test_totals_and_health():
     # (4/5 connections + 3/4 hosts + 9/10 nodes + 0/1 arrays) / 4
     assert t["health_pct"] == round((0.8 + 0.75 + 0.9 + 0) / 4 * 100, 1)
     assert [p["label"] for p in t["health_parts"]][0] == "Connections answering"
+    assert all(p["detail"] and p["link"].startswith("#/") for p in t["health_parts"])
     assert totals([])["health_pct"] is None
 
 
