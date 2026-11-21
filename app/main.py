@@ -1,5 +1,6 @@
 """KasTec Center: one console for Active Directory, vSphere, iDRAC, SolarWinds and VNX storage."""
 
+import ipaddress
 import json
 import logging
 import re
@@ -179,6 +180,11 @@ class GuestRunBody(BaseModel):
 
 class DCNameBody(BaseModel):
     name: str = Field(min_length=1, max_length=64)
+
+
+class DCAddressBody(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+    ip: str = Field(default="", max_length=45)   # empty: forget it and look the address up again
 
 
 class RestartCompleteBody(DCNameBody):
@@ -765,6 +771,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         with open_connector(conn) as c:
             dcs = c.domain_controllers()
             via = getattr(c, "server_host", None)
+            try:
+                lookup = getattr(c, "dns_addresses", None)
+                ad_dns = lookup([d.get("dns_name") for d in dcs]) if lookup else {}
+            except ConnectorError:
+                ad_dns = {}
         learn_dcs(conn, [d.get("dns_name") for d in dcs])
         checks = [(dc, port) for dc in dcs if "ports" not in dc for port in DC_PORTS]
         if checks:
@@ -772,14 +783,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results = list(pool.map(lambda x: port_open(x[0]["dns_name"] or x[0]["name"], x[1]), checks))
             for (dc, port), ok in zip(checks, results):
                 dc.setdefault("ports", {})[str(port)] = ok
-        # Each DC's IPv4 address as this computer's DNS sees it (Remote Desktop connects by address).
+        # Each DC's address, for Remote Desktop: one an admin typed in, else what AD's own DNS holds, else this
+        # computer's DNS (unless that's a Zscaler stand-in address, which only works through Zscaler).
+        typed = conn.config.get("dc_ips") or {}
+        for dc in dcs:
+            key = dc["name"].lower()
+            found = [ip for ip in ad_dns.get((dc.get("dns_name") or "").lower(), []) if not in_cgnat(ip)]
+            if typed.get(key):
+                dc["ip"], dc["ip_source"] = typed[key], "typed in"
+            elif found:
+                dc["ip"], dc["ip_source"] = found[0], "Active Directory DNS"
+                dc["ips"] = found
         missing = [dc for dc in dcs if not dc.get("ip")]
         if missing:
             with ThreadPoolExecutor(max_workers=min(16, len(missing))) as pool:
                 for dc, ip in zip(missing, pool.map(lambda d: ipv4_of(d.get("dns_name") or d["name"]), missing)):
-                    dc["ip"] = ip or (f"10.0.0.{10 + dcs.index(dc)}" if conn.demo else None)
+                    if ip and not in_cgnat(ip):
+                        dc["ip"], dc["ip_source"] = ip, "this computer's DNS"
         return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()},
                 "configured_dc": conn.config.get("host"), "connected_via": via}
+
+    @app.put("/api/ad/{conn_id}/domain-controllers/address", dependencies=admin_only)
+    def ad_dc_address(conn_id: str, body: DCAddressBody, request: Request):
+        """Type in the right address for a DC (Remote Desktop uses it); empty forgets it."""
+        conn = get_conn(conn_id, "ad")
+        ip = body.ip.strip()
+        if ip:
+            try:
+                ip = str(ipaddress.ip_address(ip))
+            except ValueError:
+                raise HTTPException(422, f"{ip} isn't an IP address.")
+        typed = dict(conn.config.get("dc_ips") or {})
+        if ip:
+            typed[body.name.strip().lower()] = ip
+        else:
+            typed.pop(body.name.strip().lower(), None)
+        store.update_config(conn.id, {**conn.config, "dc_ips": typed})
+        audit(request, "Domain controller address set" if ip else "Domain controller address cleared", f"{body.name.strip()} {ip}".strip())
+        return {"ok": True}
+
+    def in_cgnat(ip: str) -> bool:
+        try:
+            return ipaddress.ip_address(ip) in ipaddress.ip_network("100.64.0.0/10")
+        except ValueError:
+            return False
 
     def ipv4_of(host: str) -> str | None:
         try:

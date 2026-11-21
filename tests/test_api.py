@@ -234,7 +234,23 @@ def test_domain_controllers_endpoint(client):
     assert r["ports"]["9389"] == "AD Web Services"
     assert r["dcs"] and all(set(d["ports"]) == {"389", "636", "3268", "9389"} for d in r["dcs"])
     assert any("PDC" in d["roles"] for d in r["dcs"])
-    assert all(d["ip"] and d["ip"].count(".") == 3 for d in r["dcs"])     # Remote Desktop connects by address
+    assert all(d["ip"].startswith("10.0.10.") and d["ip_source"] == "Active Directory DNS" for d in r["dcs"])
+    name = r["dcs"][0]["name"]
+    assert client.put(f"/api/ad/{ad}/domain-controllers/address", json={"name": name, "ip": "nope"}).status_code == 422
+    assert client.put(f"/api/ad/{ad}/domain-controllers/address", json={"name": name, "ip": "10.50.241.81"}).status_code == 200
+    d = {x["name"]: x for x in client.get(f"/api/ad/{ad}/domain-controllers").json()["dcs"]}[name]
+    assert (d["ip"], d["ip_source"]) == ("10.50.241.81", "typed in")      # what an admin typed wins
+    client.put(f"/api/ad/{ad}/domain-controllers/address", json={"name": name, "ip": ""})
+    d = {x["name"]: x for x in client.get(f"/api/ad/{ad}/domain-controllers").json()["dcs"]}[name]
+    assert d["ip_source"] == "Active Directory DNS"
+
+
+def test_dns_record_parsing():
+    from app.connectors.ad import dns_record_ipv4
+    header = (4).to_bytes(2, "little") + (1).to_bytes(2, "little") + bytes([5, 240]) + bytes(2) + bytes(4) + (3600).to_bytes(4, "big") + bytes(8)
+    assert dns_record_ipv4(header + bytes([10, 50, 241, 81])) == "10.50.241.81"
+    aaaa = (16).to_bytes(2, "little") + (28).to_bytes(2, "little") + header[4:] + bytes(16)
+    assert dns_record_ipv4(aaaa) is None and dns_record_ipv4(b"short") is None
 
 
 def test_idrac_servers(client):

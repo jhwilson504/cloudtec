@@ -167,6 +167,16 @@ def _contains(attrs: list[str], q: str) -> str:
     return "(|" + "".join(f"({a}=*{term}*)" for a in attrs) + ")"
 
 
+def dns_record_ipv4(rec: bytes) -> str | None:
+    """An IPv4 address from an AD-integrated DNS record (the dnsRecord attribute), or None if it isn't an A record."""
+    if not isinstance(rec, (bytes, bytearray)) or len(rec) < 28:
+        return None
+    length, rtype = int.from_bytes(rec[0:2], "little"), int.from_bytes(rec[2:4], "little")
+    if rtype != 1 or length != 4:
+        return None
+    return ".".join(str(b) for b in rec[24:28])
+
+
 class ADConnector:
     def __init__(self, config: dict, secret: str, failover: bool = True):
         self.host = config.get("host", "").strip()
@@ -408,6 +418,39 @@ class ADConnector:
         """DNS names of the domain's DCs (a cheap query, used to learn where to fail over to)."""
         return sorted({_first(d, "dNSHostName") for d in self._search(DC_FILTER, ["dNSHostName"], 200, base=self.domain_dn)
                        if _first(d, "dNSHostName")}, key=str.lower)
+
+    def dns_addresses(self, names: list[str]) -> dict[str, list[str]]:
+        """IPv4 addresses that Active Directory's own DNS holds for these hosts (full DNS names), read over LDAP.
+
+        This is what the DCs themselves registered, so it's right even where the computer running KasTec gets
+        different answers from its own DNS (Zscaler ZPA, for one, answers with its own 100.64.x.x addresses)."""
+        wanted = {n.lower(): n for n in names if n and "." in n}
+        if not wanted:
+            return {}
+        labels = {n.split(".", 1)[0] for n in wanted}
+        filt = "(&(objectClass=dnsNode)(|" + "".join(f"(dc={escape_filter_chars(l)})" for l in labels) + "))"
+        root = self._read("", ["rootDomainNamingContext"])
+        forest = _first(root, "rootDomainNamingContext") or self.domain_dn
+        out: dict[str, list[str]] = {}
+        for base in (f"DC=DomainDnsZones,{self.domain_dn}", f"DC=ForestDnsZones,{forest}", f"CN=MicrosoftDNS,CN=System,{self.domain_dn}"):
+            try:
+                self._conn.search(base, filt, SUBTREE, attributes=["dnsRecord", "dNSTombstoned"])
+            except LDAPException:
+                continue
+            for r in self._conn.response or []:
+                if r.get("type") != "searchResEntry":
+                    continue
+                parts = [p.split("=", 1)[1] for p in re.split(r"(?<!\\),", r["dn"])[:2] if "=" in p]
+                if len(parts) < 2 or str(_first(r.get("attributes", {}), "dNSTombstoned")).upper() == "TRUE":
+                    continue
+                fqdn = f"{parts[0]}.{parts[1]}".lower()
+                if fqdn not in wanted:
+                    continue
+                for rec in (r.get("raw_attributes") or {}).get("dnsRecord", []):
+                    ip = dns_record_ipv4(rec)
+                    if ip and ip not in out.setdefault(fqdn, []):
+                        out[fqdn].append(ip)
+        return out
 
     def domain_controllers(self) -> list[dict]:
         """Every DC in the domain, with its site, Global Catalog flag and FSMO roles."""

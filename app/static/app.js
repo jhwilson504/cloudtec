@@ -2996,7 +2996,9 @@ async function renderDCs() {
           ${stat("Reachable on 9389", `${count((d) => d.ports["9389"])} / ${dcs.length}`, "needed by PowerShell AD commands")}
         </div>
         ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon", ""], dcs.map((d, i) => `<tr>
-          <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div>${d.ip ? `<div class="sub mono">${esc(d.ip)}</div>` : ""}</td>
+          <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div><div class="sub"><span class="mono" title="${esc(d.ip_source ? `From ${d.ip_source}` : "")}">${esc(d.ip || "no address found")}</span>
+            ${d.ip_source === "typed in" ? '<span class="muted">(typed in)</span>' : ""}
+            ${isAdmin() ? `<button class="btn small link" data-dcip="${i}" title="Type in this DC's IP address">${d.ip_source === "typed in" ? "Change" : "Set IP"}</button>` : ""}</div></td>
           <td>${esc(d.site || "–")}</td>
           <td>${esc(d.os || "–")}<div class="sub">${esc(d.os_version || "")}</div></td>
           <td>${roleBadges(d)}</td>
@@ -3007,6 +3009,13 @@ async function renderDCs() {
         <p class="muted small-note">Ports: ${Object.entries(ports).map(([p, l]) => `${p} ${esc(l)}`).join(" · ")}.
           Green means the computer running KasTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;
       box.querySelectorAll("[data-restart]").forEach((b) => b.onclick = () => restartDC(dcs[b.dataset.restart], dcs, conn));
+      box.querySelectorAll("[data-dcip]").forEach((b) => b.onclick = async () => {
+        const d = dcs[b.dataset.dcip];
+        const ip = prompt(`IP address for ${d.name} (Remote Desktop connects to it). Leave empty to look it up again.`, d.ip_source === "typed in" ? d.ip : "");
+        if (ip === null) return;
+        try { await api("PUT", `/api/ad/${state.ad}/domain-controllers/address`, { name: d.name, ip: ip.trim() }); toast("Saved"); route(); }
+        catch (err) { alert(err.message); }
+      });
     } catch (err) {
       box.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`;
     }

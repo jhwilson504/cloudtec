@@ -136,6 +136,9 @@ class DemoAD:
         return [dict(c) for c in self.data["computers"]
                 if _match(q, c["name"], c["dns_name"], c["os"])][:limit]
 
+    def dns_addresses(self, names: list[str]) -> dict[str, list[str]]:
+        return {n.lower(): [f"10.0.10.{11 + i}"] for i, n in enumerate(sorted(n for n in names if n))}
+
     def domain_controllers(self) -> list[dict]:
         sites = ["Nassau-HQ", "Nassau-HQ", "Freeport"]
         out = []
