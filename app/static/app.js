@@ -2996,7 +2996,7 @@ async function renderDCs() {
           ${stat("Reachable on 9389", `${count((d) => d.ports["9389"])} / ${dcs.length}`, "needed by PowerShell AD commands")}
         </div>
         ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon", ""], dcs.map((d, i) => `<tr>
-          <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div><div class="sub"><span class="mono" title="${esc(d.ip_source ? `From ${d.ip_source}` : "")}">${esc(d.ip || "no address found")}</span>
+          <td><b>${esc(d.name)}</b><div class="sub mono">${esc(d.dns_name || "")}</div><div class="sub"><span class="mono" title="${esc(d.ip_source ? `From ${d.ip_source}` : "")}">${esc(d.ip || "no address found")}</span>
             ${d.ip_source === "typed in" ? '<span class="muted">(typed in)</span>' : ""}
             ${isAdmin() ? `<button class="btn small link" data-dcip="${i}" title="Type in this DC's IP address">${d.ip_source === "typed in" ? "Change" : "Set IP"}</button>` : ""}</div></td>
           <td>${esc(d.site || "–")}</td>
