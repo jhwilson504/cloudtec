@@ -501,6 +501,71 @@ $("#global-search").addEventListener("submit", (e) => {
   if (q) location.hash = `#/search/${encodeURIComponent(q)}`;
 });
 
+// ---- error reports (Settings) ----------------------------------------------
+// KasTec notes its own unexpected errors. Sending one to GitHub is what lets the maintenance agent suggest a fix;
+// nothing is sent until an admin presses Send (or turns on automatic reports), and the exact text is shown first.
+
+async function errorReports(card) {
+  let d;
+  try { d = await api("GET", "/api/errors"); } catch (err) { card.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
+  const s = d.settings, when = (t) => fmtDate(new Date(t * 1000).toISOString());
+  card.innerHTML = `<h2>Error reports</h2>
+    <p class="muted" style="margin-top:0">Unexpected errors inside KasTec (bugs, not a server being down). Send one to GitHub and the
+      KasTec maintenance agent posts a diagnosis and a suggested fix on it. <b>It only changes anything after you reply
+      “fix it” on the issue, and your KasTec only changes when you merge its pull request.</b></p>
+    ${table(["Error", "Where", "Seen", "Last", "Report", ""], d.errors.map((e) => `<tr>
+      <td><b>${esc(e.type)}</b> <span class="badge chip">${e.kind === "browser" ? "page" : "server"}</span><div class="sub">${esc(e.message)}</div></td>
+      <td class="mono">${esc(e.where || "–")}</td><td>${e.count}×</td><td>${when(e.last)}</td>
+      <td>${e.issue ? `<a href="https://github.com/${esc(s.repo)}/issues/${e.issue}" target="_blank" rel="noopener">#${e.issue}</a>${e.count > (e.reported_count || 0) ? ' <span class="muted">(seen again)</span>' : ""}` : '<span class="muted">not sent</span>'}</td>
+      <td class="actions"><button class="btn small" data-prev="${esc(e.id)}">${e.issue ? "Update" : "Preview & send"}</button>
+        <button class="btn small ghost" data-dis="${esc(e.id)}" title="Hide this error">Dismiss</button></td></tr>`), "No errors noted.")}
+    <form id="err-form" class="form" style="margin-top:16px" autocomplete="off">
+      <label>GitHub repository <input name="repo" value="${esc(s.repo)}" placeholder="owner/name"></label>
+      <label>GitHub token ${s.has_token ? '<span class="badge ok">saved</span>' : ""}
+        <input name="token" type="password" placeholder="${s.has_token ? "leave empty to keep" : "fine-grained token: Issues read & write"}"></label>
+      <label class="inline full"><input type="checkbox" name="auto" ${s.auto_send ? "checked" : ""}> Send new errors automatically
+        (otherwise you press Send on each one)</label>
+      <p class="full muted small-note" style="margin:0">Use a <b>fine-grained</b> token limited to this one repository with only
+        <i>Issues: read and write</i>. It's stored encrypted. Reports never include addresses, host names, user names or
+        quoted values; check with Preview.</p>
+      <div class="full" id="err-msg"></div>
+      <div class="full"><button class="btn primary">Save</button></div></form>`;
+  card.querySelectorAll("[data-dis]").forEach((b) => b.onclick = async () => { await api("DELETE", `/api/errors/${b.dataset.dis}`); errorReports(card); });
+  card.querySelectorAll("[data-prev]").forEach((b) => b.onclick = async () => {
+    const p = await api("GET", `/api/errors/${b.dataset.prev}/preview`);
+    modal(`<h2>Report to ${esc(p.repo)}</h2><p class="muted">Exactly this will be sent (the repository may be public).</p>
+      <div class="card" style="background:var(--panel-2)"><b>${esc(p.title)}</b><pre class="gr-out" style="white-space:pre-wrap">${esc(p.body)}</pre></div>
+      <div id="send-msg"></div>
+      <div class="modal-actions"><button class="btn" id="send-no">Cancel</button><button class="btn primary" id="send-yes">Send to GitHub</button></div>`, true);
+    $("#send-no").onclick = closeModal;
+    $("#send-yes").onclick = async () => {
+      try { const r = await api("POST", `/api/errors/${b.dataset.prev}/send`); closeModal(); toast(`Sent as issue #${r.issue}`); errorReports(card); }
+      catch (err) { $("#send-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+    };
+  });
+  const f = $("#err-form");
+  f.onsubmit = async (ev) => {
+    ev.preventDefault();
+    try {
+      await api("PUT", "/api/errors/settings", { repo: f.repo.value.trim(), auto_send: f.auto.checked, ...(f.token.value ? { token: f.token.value } : {}) });
+      toast("Saved"); errorReports(card);
+    } catch (err) { $("#err-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+  };
+}
+
+// Pages that crash in the browser are noted too (once per kind of error per visit).
+const reportedClientErrors = new Set();
+function reportClientError(err, kind) {
+  if (!state.me) return;
+  const message = String(err?.message || err || ""), stack = String(err?.stack || "");
+  const key = `${kind}|${message}|${stack.split("\n")[1] || ""}`;
+  if (!message || reportedClientErrors.has(key) || /Please sign in again|Can't reach KasTec/.test(message)) return;
+  reportedClientErrors.add(key);
+  apiRaw("POST", "/api/errors/client", { message, stack, page: location.hash.split("/").slice(0, 2).join("/"), kind: err?.name || kind }).catch(() => {});
+}
+window.addEventListener("error", (e) => reportClientError(e.error || e.message, "Error"));
+window.addEventListener("unhandledrejection", (e) => { if (!(e.reason && typeof e.reason === "object" && "status" in e.reason)) reportClientError(e.reason, "UnhandledRejection"); });
+
 // ---- about -----------------------------------------------------------------
 
 async function renderAbout() {
@@ -3861,7 +3926,9 @@ async function renderSettings() {
            double-click <b>Set up network access</b> in the KasTec folder.</p>`}
     <p class="muted small-note">To change this, run <b>Set up network access</b> in the KasTec folder, then restart KasTec with <b>Start KasTec</b>.</p></div>`;
   view.innerHTML = `<div class="page-head"><div><h1>Settings</h1></div></div>
-    <div class="card"><h2>Your password</h2>${body}</div>${netCard}`;
+    <div class="card"><h2>Your password</h2>${body}</div>${netCard}
+    ${isAdmin() ? '<div class="card section" id="err-card"></div>' : ""}`;
+  if (isAdmin()) errorReports($("#err-card"));
 
   const form = $("#pw-change");
   if (!form) return;
@@ -3949,7 +4016,10 @@ async function route() {
   state.routeDone = seq;
   tidyHeader();
   if (state.clobbered) route();
-  else if (error) view.innerHTML = `<div class="notice bad">${esc(error.message)}</div>`;
+  else if (error) {
+    if (!("status" in error)) reportClientError(error, "PageError");
+    view.innerHTML = `<div class="notice bad">${esc(error.message)}</div>`;
+  }
 }
 
 function start() {

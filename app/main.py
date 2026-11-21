@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,7 +29,7 @@ from .connectors import ConnectorError, open_connector
 from .connectors.ad import ADConnector
 from .connectors.idrac import parse_hosts
 from .connectors.vnx import link_datastores
-from . import activity, ecosystem, flows, metrics, netmap, provision, remote
+from . import activity, ecosystem, errorwatch, flows, metrics, netmap, provision, remote
 from .shell import PowerShellSession, connect_script, find_powershell
 from .store import Connection, Store, load_or_create_key
 from .tls import cert_summary, read_network
@@ -237,7 +238,9 @@ def _short_name(name: str | None) -> str:
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings.from_env()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    store = Store(settings.data_dir, load_or_create_key(settings.data_dir, settings.secret_key))
+    key = load_or_create_key(settings.data_dir, settings.secret_key)
+    store = Store(settings.data_dir, key)
+    errors = errorwatch.ErrorWatch(settings.data_dir, key, APP_VERSION)
     admin = AdminPassword(settings.data_dir, settings.admin_password)
     sessions = Sessions(settings.session_hours * 3600)
     throttle = LoginThrottle()
@@ -258,8 +261,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI):
         watcher.start()
         flow_collector.restart()
+        errors.start()
         yield
         flow_collector.stop()
+        errors.stop()
         watcher.stop()
         ssh.close_all()
         netmaps.close()
@@ -268,6 +273,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="KasTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json",
                   lifespan=lifespan)
+
+    def sensitive_terms() -> list[str]:
+        """Names and addresses from KasTec's own settings: always taken out of error reports."""
+        terms = set()
+        for c in store.list():
+            terms.add(c.name)
+            for k in ("host", "base_dn", "bind_user", "username", "sp_a", "sp_b", "vdom"):
+                if c.config.get(k):
+                    terms.add(str(c.config[k]))
+            terms.update(str(h) for h in c.config.get("hosts") or [])
+            terms.update(str(h) for h in c.config.get("known_dcs") or [])
+        for u in store.list_users():
+            terms.update(x for x in (u.username, getattr(u, "display_name", None)) if x)
+        return [t for t in terms if t and t.lower() not in ("admin", "root")]
+
+    @app.exception_handler(Exception)
+    def unexpected_error(request: Request, exc: Exception):
+        """A bug, not a server being down: note it for the Error reports page and say so."""
+        try:
+            errors.extra_terms = sensitive_terms()
+            fp = errors.record_exception(exc, f"{request.method} {request.url.path}")
+        except Exception:  # noqa: BLE001 - noting the error must never make things worse
+            fp = "?"
+        log.exception("Unexpected error in %s %s (error %s)", request.method, request.url.path, fp)
+        return JSONResponse(status_code=500, content={"detail": f"Something went wrong inside KasTec (error {fp}). "
+                                                                "It has been noted under Settings > Error reports."})
 
     @app.exception_handler(ConnectorError)
     def connector_error(request: Request, exc: ConnectorError):
@@ -851,6 +882,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {**out, "ok": ok, "ms": round((time.perf_counter() - t0) * 1000, 1) if ok else None}
 
     started = time.time()
+
+    # --- error watch ----------------------------------------------------------
+
+    class ClientErrorBody(BaseModel):
+        message: str = Field(default="", max_length=2000)
+        stack: str = Field(default="", max_length=8000)
+        page: str = Field(default="", max_length=200)
+        kind: str = Field(default="Error", max_length=60)
+
+    client_errors = {"hour": 0, "n": 0}
+
+    @app.post("/api/errors/client", dependencies=api)
+    def client_error(body: ClientErrorBody):
+        """A page crashed in someone's browser."""
+        hour = int(time.time() // 3600)
+        if client_errors["hour"] != hour:
+            client_errors.update(hour=hour, n=0)
+        client_errors["n"] += 1
+        if client_errors["n"] > 60:   # a page stuck in a loop shouldn't flood the list
+            return {"ok": False}
+        errors.extra_terms = sensitive_terms()
+        page = re.sub(r"[^#/\w-].*$", "", body.page.split("?")[0])[:40]
+        return {"ok": True, "id": errors.record("browser", re.sub(r"\W", "", body.kind)[:40] or "Error", body.message,
+                                                 errorwatch.js_frames(body.stack), page)}
+
+    class ErrorSettingsBody(BaseModel):
+        auto_send: bool | None = None
+        repo: str | None = Field(default=None, max_length=100)
+        token: str | None = Field(default=None, max_length=300)
+
+    @app.get("/api/errors", dependencies=admin_only)
+    def error_list():
+        return {"errors": errors.list(), "settings": errors.public_settings()}
+
+    @app.put("/api/errors/settings", dependencies=admin_only)
+    def error_settings(body: ErrorSettingsBody, request: Request):
+        try:
+            s = errors.save_settings(body.auto_send, body.repo, body.token)
+        except ValueError as e:
+            raise HTTPException(422, str(e)) from e
+        audit(request, "Error reports settings changed",
+              f"automatic={s['auto_send']} repo={s['repo']} token={'set' if s['has_token'] else 'none'}")
+        return s
+
+    @app.get("/api/errors/{fp}/preview", dependencies=admin_only)
+    def error_preview(fp: str):
+        try:
+            title, body = errors.report_text(fp)
+        except KeyError:
+            raise HTTPException(404, "No such error")
+        return {"title": title, "body": body, "repo": errors.settings()["repo"]}
+
+    @app.post("/api/errors/{fp}/send", dependencies=admin_only)
+    def error_send(fp: str, request: Request):
+        try:
+            r = errors.send(fp)
+        except KeyError:
+            raise HTTPException(404, "No such error")
+        except (ValueError, httpx.HTTPError) as e:
+            raise HTTPException(502, str(e)) from e
+        audit(request, "Error report sent to GitHub", f"{fp} issue #{r['issue']}")
+        return r
+
+    @app.delete("/api/errors/{fp}", dependencies=admin_only)
+    def error_dismiss(fp: str):
+        if not errors.dismiss(fp):
+            raise HTTPException(404, "No such error")
+        return {"ok": True}
 
     @app.get("/api/about", dependencies=api)
     def about():
