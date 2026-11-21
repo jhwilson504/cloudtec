@@ -25,7 +25,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import pkcs7, pkcs12
 from cryptography.x509.oid import NameOID
 
-from .tls import _key_pem, _pem, _san, _server_extensions, _write
+from .tls import _key_pem, _pem, _server_extensions, _write
 
 DIR = "cert-requests"
 META, CSR, KEY, CERT, PFX = "meta.json", "request.csr", "private.key", "certificate.pem", "certificate.pfx"

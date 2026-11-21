@@ -974,12 +974,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/status", dependencies=api)
     def status_bar():
         """For the status bar: each connection's response time, checked at most every 20 seconds."""
-        now = time.time()
-        if status_cache["data"] is None or now - status_cache["at"] > 20:
-            conns = store.list()
+        now, conns = time.time(), store.list()
+        sig = [(c.id, c.name) for c in conns]   # a connection added, renamed or removed: check again now
+        if status_cache["data"] is None or now - status_cache["at"] > 20 or status_cache.get("sig") != sig:
             with ThreadPoolExecutor(max_workers=max(1, min(16, len(conns)))) as pool:
                 status_cache["data"] = list(pool.map(reach, conns))
-            status_cache["at"] = now
+            status_cache.update(at=now, sig=sig)
         return {"connections": status_cache["data"], "checked": status_cache["at"], "version": APP_VERSION}
 
     def ipv4_of(host: str) -> str | None:

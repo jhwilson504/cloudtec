@@ -16,7 +16,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
-from . import shell as powershell
 from .connectors import ConnectorError
 from .connectors.ad import ADConnector
 

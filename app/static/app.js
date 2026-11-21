@@ -511,6 +511,7 @@ $("#global-search").addEventListener("submit", (e) => {
 async function errorReports(card) {
   let d;
   try { d = await api("GET", "/api/errors"); } catch (err) { card.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
+  if (!card.isConnected) return;   // you moved to another page while this loaded
   const s = d.settings, when = (t) => fmtDate(new Date(t * 1000).toISOString());
   card.innerHTML = `<h2>Error reports</h2>
     <p class="muted" style="margin-top:0">Unexpected errors inside KasTec (bugs, not a server being down). Send one to GitHub and the
@@ -546,13 +547,13 @@ async function errorReports(card) {
       catch (err) { $("#send-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
     };
   });
-  const f = $("#err-form");
+  const f = card.querySelector("#err-form");
   f.onsubmit = async (ev) => {
     ev.preventDefault();
     try {
       await api("PUT", "/api/errors/settings", { repo: f.repo.value.trim(), auto_send: f.auto.checked, ...(f.token.value ? { token: f.token.value } : {}) });
       toast("Saved"); errorReports(card);
-    } catch (err) { $("#err-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+    } catch (err) { card.querySelector("#err-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
   };
 }
 
@@ -1717,6 +1718,7 @@ function ecoWire(wrap, m, pos) {
 async function ecoSettings(card) {
   let s;
   try { s = await api("GET", "/api/ecosystem/settings"); } catch (err) { card.innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; return; }
+  if (!card.isConnected) return;   // you moved to another page while this loaded
   const addr = s.addresses[0] || "<KasTec server IP>";
   card.innerHTML = `<h2>NetFlow and Zscaler</h2>
     <form id="eco-form" class="form" autocomplete="off">
@@ -1748,14 +1750,14 @@ end</pre>
       <p class="muted small-note">Repeat the interface part for each internet (WAN) interface. Then allow UDP ${s.port} in to the KasTec server's Windows Firewall
         (in an Administrator PowerShell: <code>New-NetFirewallRule -DisplayName "KasTec NetFlow" -Direction Inbound -Protocol UDP -LocalPort ${s.port} -Action Allow</code>).
         This works best with KasTec on a server next to the FortiGate. KasTec computer's addresses: ${s.addresses.map(esc).join(", ") || "unknown"}.</p></details>`;
-  const fm = $("#eco-form");
+  const fm = card.querySelector("#eco-form");
   fm.onsubmit = async (ev) => {
     ev.preventDefault();
     const list = (v) => v.split(/[\s,;]+/).map((x) => x.trim()).filter(Boolean);
     try {
       await api("PUT", "/api/ecosystem/settings", { enabled: fm.enabled.checked, port: Number(fm.port.value), zpa_connectors: list(fm.zpa.value), internal: list(fm.internal.value) });
       toast("Saved"); ecoSettings(card);
-    } catch (err) { $("#eco-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+    } catch (err) { card.querySelector("#eco-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
   };
 }
 
@@ -2653,15 +2655,15 @@ function wireFilters(box, a, reload, people) {
     else { d.setDate(1); d.setMonth(d.getMonth() + dir); }
     a.date = d.toISOString().slice(0, 10); reload();
   };
-  $("#act-prev").onclick = () => shift(-1);
-  $("#act-next").onclick = () => shift(1);
-  $("#act-refresh").onclick = reload;
-  const sel = $("#act-user");
+  box.querySelector("#act-prev").onclick = () => shift(-1);
+  box.querySelector("#act-next").onclick = () => shift(1);
+  box.querySelector("#act-refresh").onclick = reload;
+  const sel = box.querySelector("#act-user");
   if (sel && people) {
     sel.innerHTML += people.map((p) => `<option value="${esc(p.user)}" ${a.user === p.user ? "selected" : ""}>${esc(p.name)}</option>`).join("");
     sel.onchange = () => { a.user = sel.value; reload(); };
   }
-  const sc = $("#act-sched");
+  const sc = box.querySelector("#act-sched");
   if (sc) sc.onchange = () => { a.scheduled = sc.checked; reload(); };
 }
 
@@ -2687,6 +2689,7 @@ async function actDashboard(box, a) {
     api("GET", "/api/activity/people")]);
   const k = s.kpis, dl = s.deltas;
   const kpi = (value, label, delta) => `<div class="card act-kpi"><div class="v">${value}${delta}</div><div class="l">${label}</div></div>`;
+  if (!box.isConnected) return;   // you moved to another tab or page while this loaded
   box.innerHTML = `${actFilters(a)}
     ${s.people ? "" : `<div class="notice" style="margin-bottom:14px">No activity recorded for this period yet. Set up monitoring on the <b>Settings</b> tab, or load demo data there to try the page.</div>`}
     <div class="act-kpis">
@@ -2711,7 +2714,7 @@ async function actDashboard(box, a) {
           <span class="val">${r.late ? `<span class="badge warn">${r.late} late</span>` : ""} ${r.early ? `<span class="badge plain">${r.early} early</span>` : ""}</span></li>`, "Everyone kept to the schedule.")}
     </div>
     <p class="muted small-note">${esc(actWhen(s.period, s.from, s.to))}${s.scheduled_only ? " · scheduled hours only" : ""}. Percentages are of active time (with keyboard or mouse input). Labels are set on the Apps & websites tab.</p>`;
-  $("#act-when").textContent = actWhen(s.period, s.from, s.to);
+  box.querySelector("#act-when").textContent = actWhen(s.period, s.from, s.to);
   wireFilters(box, a, () => actDashboard(box, a), people);
   wireTimeline(box.querySelector(".act-timeline"), s.timeline, s.period);
 }
@@ -2729,6 +2732,7 @@ async function actLive(box) {
         "Nobody reported in the last day. Check the agent is deployed (Settings tab).")}`;
   };
   await draw();
+  if (!box.isConnected) return;   // replaced while loading: don't leave a second timer running
   state.actTimer = setInterval(() => { if (location.hash.startsWith("#/activity") && state.act.tab === "live") draw().catch(() => {}); else clearInterval(state.actTimer); }, 30000);
 }
 
@@ -2736,6 +2740,7 @@ async function actAttendance(box, a) {
   const [rows, people] = await Promise.all([
     api("GET", `/api/activity/attendance?period=${a.period}&date=${a.date}&user=${encodeURIComponent(a.user)}`),
     api("GET", "/api/activity/people")]);
+  if (!box.isConnected) return;   // you moved to another tab or page while this loaded
   box.innerHTML = `${actFilters(a, { scheduled: false })}
     <div class="toolbar"><button class="btn" id="act-att-csv" ${rows.length ? "" : "disabled"}>Download (CSV)</button></div>
     ${table(["Date", "Person", "First activity", "Last activity", "Active", "Idle", "Schedule"], rows.slice().reverse().map((r) => `<tr>
@@ -2744,9 +2749,9 @@ async function actAttendance(box, a) {
       <td>${esc(r.first)}</td><td>${esc(r.last)}</td><td>${hrs(r.active)}</td><td>${hrs(r.idle)}</td>
       <td>${r.late ? '<span class="badge warn">Late start</span> ' : ""}${r.early ? '<span class="badge plain">Left early</span>' : ""}${!r.late && !r.early ? '<span class="badge ok">On time</span>' : ""}</td></tr>`),
       "No activity in this period.")}`;
-  $("#act-when").textContent = actWhen(a.period, ...actBounds(a.period, a.date));
+  box.querySelector("#act-when").textContent = actWhen(a.period, ...actBounds(a.period, a.date));
   wireFilters(box, a, () => actAttendance(box, a), people);
-  $("#act-att-csv").onclick = () => downloadCsv(`attendance-${a.period}-${a.date}.csv`,
+  box.querySelector("#act-att-csv").onclick = () => downloadCsv(`attendance-${a.period}-${a.date}.csv`,
     ["Date", "Person", "User", "Computers", "First activity", "Last activity", "Active minutes", "Idle minutes", "Late start", "Left early"],
     rows.map((r) => [r.day, r.name, r.user, r.computers.join("; "), r.first, r.last, Math.round(r.active / 60), Math.round(r.idle / 60), r.late ? "Yes" : "", r.early ? "Yes" : ""]));
 }
@@ -2754,21 +2759,22 @@ async function actAttendance(box, a) {
 async function actApps(box, a) {
   const [rows, settings] = await Promise.all([api("GET", `/api/activity/apps?period=${a.period}&date=${a.date}`), api("GET", "/api/activity/settings")]);
   let filter = "all";
+  if (!box.isConnected) return;   // you moved to another tab or page while this loaded
   box.innerHTML = `${actFilters(a, { user: false, scheduled: false })}
     <div class="toolbar"><div class="segmented" id="act-app-filter"><button data-f="all" class="active">All ${rows.length}</button><button data-f="undefined">Not labelled (${rows.filter((r) => r.label === "undefined").length})</button><button data-f="unproductive">Unproductive</button></div>
       <input type="search" id="act-app-q" placeholder="Find an app or website…" style="width:240px"></div>
     <div id="act-app-list"></div>
     <p class="muted small-note">A website's label wins over its browser's, and covers its subdomains (google.com covers mail.google.com). Changes apply to past data too.</p>`;
-  $("#act-when").textContent = actWhen(a.period, ...actBounds(a.period, a.date));
+  box.querySelector("#act-when").textContent = actWhen(a.period, ...actBounds(a.period, a.date));
   const draw = () => {
-    const q = ($("#act-app-q").value || "").toLowerCase();
+    const q = (box.querySelector("#act-app-q").value || "").toLowerCase();
     const shown = rows.filter((r) => (filter === "all" || r.label === filter) && (!q || r.name.includes(q)));
-    $("#act-app-list").innerHTML = table(["App or website", "Used by", "Active time", "Label"], shown.slice(0, 300).map((r) => `<tr>
+    box.querySelector("#act-app-list").innerHTML = table(["App or website", "Used by", "Active time", "Label"], shown.slice(0, 300).map((r) => `<tr>
       <td><b>${esc(r.name)}</b> ${r.kind === "website" ? `<span class="muted">website${r.via ? ` · ${esc(r.via)}` : ""}</span>` : '<span class="muted">app</span>'} ${r.ai ? '<span class="badge info">AI</span>' : ""}</td>
       <td>${r.users} ${r.users === 1 ? "person" : "people"}</td><td>${hrs(r.active)}</td>
       <td><select data-key="${esc(r.key)}">${ACT_LABELS.map(([k, l]) => `<option value="${k}" ${r.label === k ? "selected" : ""}>${l}</option>`).join("")}</select>
         ${r.custom ? '<span class="muted small-note">your label</span>' : ""}</td></tr>`), "Nothing here for this period.");
-    $("#act-app-list").querySelectorAll("select[data-key]").forEach((sel) => sel.onchange = async () => {
+    box.querySelector("#act-app-list").querySelectorAll("select[data-key]").forEach((sel) => sel.onchange = async () => {
       const labels = { ...settings.labels, [sel.dataset.key]: sel.value };
       try {
         const saved = await api("PUT", "/api/activity/settings", { labels });
@@ -2780,7 +2786,7 @@ async function actApps(box, a) {
   };
   box.querySelectorAll("#act-app-filter button").forEach((b) => b.onclick = () => {
     filter = b.dataset.f; box.querySelectorAll("#act-app-filter button").forEach((x) => x.classList.toggle("active", x === b)); draw(); });
-  $("#act-app-q").oninput = debounce(draw, 200);
+  box.querySelector("#act-app-q").oninput = debounce(draw, 200);
   wireFilters(box, a, () => actApps(box, a));
   draw();
 }
@@ -2789,6 +2795,7 @@ async function actSettings(box) {
   const s = await api("GET", "/api/activity/settings");
   const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
   const server = `${location.protocol}//${location.host}`;
+  if (!box.isConnected) return;   // you moved to another tab or page while this loaded
   box.innerHTML = `<div class="card section"><h2>Who and when</h2>
     <form id="act-form" class="form" autocomplete="off">
       <label class="inline full"><input type="checkbox" name="enabled" ${s.enabled ? "checked" : ""}> <b>Record activity</b> (agents record nothing while this is off)</label>
@@ -2824,7 +2831,7 @@ async function actSettings(box) {
       <p class="muted">Fills the pages with five weeks of made-up activity for the demo AD's people (or 20 sample people), so you can see how it looks before deploying anything.</p>
       <button class="btn" id="act-demo">Load demo data</button> ${s.demo_data ? '<button class="btn danger" id="act-demo-clear">Remove demo data</button>' : ""}
     </div>`;
-  const f = $("#act-form");
+  const f = box.querySelector("#act-form");
   f.onsubmit = async (e) => {
     e.preventDefault();
     try {
@@ -2834,22 +2841,22 @@ async function actSettings(box) {
         schedule: { start: f.start.value, end: f.end.value, grace_minutes: Number(f.grace.value),
           days: [...f.querySelectorAll("[name=day]:checked")].map((c) => Number(c.value)) } });
       toast("Saved"); actSettings(box);
-    } catch (err) { $("#act-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+    } catch (err) { box.querySelector("#act-msg").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
   };
-  $("#act-dl").onclick = async () => {
+  box.querySelector("#act-dl").onclick = async () => {
     try {
-      const res = await fetch(`/api/activity/agent.ps1?server=${encodeURIComponent($("#act-server").value.trim())}`);
+      const res = await fetch(`/api/activity/agent.ps1?server=${encodeURIComponent(box.querySelector("#act-server").value.trim())}`);
       if (!res.ok) throw new Error((await res.json()).detail || "Download failed");
       const a2 = document.createElement("a");
       a2.href = URL.createObjectURL(await res.blob()); a2.download = "KasTecAgent.ps1"; a2.click();
     } catch (err) { toast(err.message, true); }
   };
-  $("#act-newkey").onclick = async () => {
+  box.querySelector("#act-newkey").onclick = async () => {
     if (!(await confirmAction("New agent key", "Agents using the current key stop reporting until you download the agent again and replace it on NETLOGON.", "Make a new key", true))) return;
     await api("POST", "/api/activity/settings/new-key"); toast("New key made"); actSettings(box);
   };
-  $("#act-demo").onclick = async () => { $("#act-demo").disabled = true; const r = await api("POST", "/api/activity/demo"); toast(`Loaded demo activity for ${r.people} people`); actSettings(box); };
-  $("#act-demo-clear")?.addEventListener("click", async () => { await api("DELETE", "/api/activity/demo"); toast("Demo data removed"); actSettings(box); });
+  box.querySelector("#act-demo").onclick = async () => { box.querySelector("#act-demo").disabled = true; const r = await api("POST", "/api/activity/demo"); toast(`Loaded demo activity for ${r.people} people`); actSettings(box); };
+  box.querySelector("#act-demo-clear")?.addEventListener("click", async () => { await api("DELETE", "/api/activity/demo"); toast("Demo data removed"); actSettings(box); });
 }
 
 // ---- servers (iDRAC) -------------------------------------------------------
@@ -4018,6 +4025,7 @@ async function route() {
   }
   state.routeDone = seq;
   tidyHeader();
+  if (name === "connections" || name === "dashboard") drawStatusBar();   // pick up added or removed connections
   if (state.clobbered) route();
   else if (error) {
     if (!("status" in error)) reportClientError(error, "PageError");

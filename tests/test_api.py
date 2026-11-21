@@ -349,3 +349,5 @@ def test_status_bar(client):
     add_demo(client, "ad", "Corp")
     s = client.get("/api/status").json()
     assert s["version"] and s["connections"][0]["ok"] and s["connections"][0]["ms"] > 0 and s["connections"][0]["port"] == 636
+    add_demo(client, "vsphere", "VC")                                 # a new connection shows at once, not after 20 s
+    assert {c["name"] for c in client.get("/api/status").json()["connections"]} == {"Corp", "VC"}
