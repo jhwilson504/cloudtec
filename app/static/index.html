@@ -31,38 +31,50 @@
     <aside class="sidebar">
       <div class="brand"><img src="/static/logo.svg" alt="" class="logo"> <span>Kas<span class="tec">Tec</span></span></div>
       <nav>
-        <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
-        <a href="#/directory" data-nav="directory">Active Directory</a>
-        <a href="#/reset" data-nav="reset">Reset password</a>
-        <a href="#/dcs" data-nav="dcs">Domain controllers</a>
-        <a href="#/vsphere" data-nav="vsphere">vSphere</a>
-        <a href="#/ecosystem" data-nav="ecosystem">Ecosystem</a>
-        <a href="#/servers" data-nav="servers">Servers (iDRAC)</a>
-        <a href="#/solarwinds" data-nav="solarwinds">SolarWinds</a>
-        <a href="#/vnx" data-nav="vnx">Storage (VNX)</a>
-        <a href="#/crosscheck" data-nav="crosscheck">Cross-check</a>
-        <a href="#/activity" data-nav="activity" data-admin>Employee activity</a>
-        <a href="#/certificates" data-nav="certificates">Certificates</a>
-        <a href="#/powershell" data-nav="powershell" data-admin><img src="/static/powershell.svg" alt="" class="nav-icon"> PowerShell</a>
-        <a href="#/connections" data-nav="connections" data-admin>Connections</a>
-        <a href="#/users" data-nav="users" data-admin>Users</a>
-        <a href="#/settings" data-nav="settings">Settings</a>
+        <div class="nav-group">Overview</div>
+        <a href="#/dashboard" data-nav="dashboard" title="Dashboard"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-layout-dashboard"/></svg><span>Dashboard</span></a>
+        <a href="#/ecosystem" data-nav="ecosystem" title="Ecosystem"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-network"/></svg><span>Ecosystem</span></a>
+        <div class="nav-group">Identity</div>
+        <a href="#/directory" data-nav="directory" title="Active Directory"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-users"/></svg><span>Active Directory</span></a>
+        <a href="#/reset" data-nav="reset" title="Reset password"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-key-round"/></svg><span>Reset password</span></a>
+        <a href="#/dcs" data-nav="dcs" title="Domain controllers"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-server-cog"/></svg><span>Domain controllers</span></a>
+        <div class="nav-group">Infrastructure</div>
+        <a href="#/vsphere" data-nav="vsphere" title="vSphere"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-boxes"/></svg><span>vSphere</span></a>
+        <a href="#/servers" data-nav="servers" title="Servers (iDRAC)"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-server"/></svg><span>Servers (iDRAC)</span></a>
+        <a href="#/vnx" data-nav="vnx" title="Storage (VNX)"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-hard-drive"/></svg><span>Storage (VNX)</span></a>
+        <a href="#/solarwinds" data-nav="solarwinds" title="SolarWinds"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-activity"/></svg><span>SolarWinds</span></a>
+        <div class="nav-group">Security &amp; compliance</div>
+        <a href="#/certificates" data-nav="certificates" title="Certificates"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-shield-check"/></svg><span>Certificates</span></a>
+        <a href="#/crosscheck" data-nav="crosscheck" title="Cross-check"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-git-compare-arrows"/></svg><span>Cross-check</span></a>
+        <a href="#/activity" data-nav="activity" title="Employee activity" data-admin><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-eye"/></svg><span>Employee activity</span></a>
+        <div class="nav-group">Administration</div>
+        <a href="#/powershell" data-nav="powershell" title="PowerShell" data-admin><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-terminal"/></svg><span>PowerShell</span></a>
+        <a href="#/connections" data-nav="connections" title="Connections" data-admin><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-plug"/></svg><span>Connections</span></a>
+        <a href="#/users" data-nav="users" title="Users" data-admin><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-user-cog"/></svg><span>Users</span></a>
+        <a href="#/settings" data-nav="settings" title="Settings"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span>Settings</span></a>
       </nav>
-      <div class="whoami"><div class="muted small-note" style="margin:0">Signed in as</div><b id="whoami-name"></b>
-        <div class="muted small-note" style="margin:0" id="whoami-role"></div></div>
-      <div class="theme-switch" role="group" aria-label="Theme">
-        <button type="button" data-theme-choice="auto" title="Follow the Windows setting">Auto</button>
-        <button type="button" data-theme-choice="light" title="Light theme">☀ Light</button>
-        <button type="button" data-theme-choice="dark" title="Dark theme">☾ Dark</button>
+      <div class="side-foot">
+        <div class="whoami"><span class="avatar" id="whoami-initials"></span>
+          <div class="who"><b id="whoami-name"></b><div class="muted" id="whoami-role"></div></div></div>
+        <div class="theme-switch" role="group" aria-label="Theme">
+          <button type="button" data-theme-choice="auto" title="Theme: follow the Windows setting"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-monitor"/></svg></button>
+          <button type="button" data-theme-choice="light" title="Theme: light"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-sun"/></svg></button>
+          <button type="button" data-theme-choice="dark" title="Theme: dark"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-moon"/></svg></button>
+        </div>
+        <div class="side-actions">
+          <button id="logout" class="btn ghost small" title="Sign out"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-log-out"/></svg><span>Sign out</span></button>
+          <button type="button" id="nav-collapse" class="btn ghost small" title="Collapse the sidebar (Ctrl+B)"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-panel-left-close"/></svg></button>
+        </div>
       </div>
-      <button id="logout" class="btn ghost small">Sign out</button>
     </aside>
     <main>
       <header class="topbar">
         <form id="global-search" class="search">
+          <svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg>
           <input type="search" id="global-q" placeholder="Search users, groups, computers and VMs everywhere…">
+          <button type="button" class="kbd-hint" id="palette-open" title="Jump to a page or action">Ctrl K</button>
         </form>
-        <button type="button" id="fs-toggle" class="btn fs-toggle" title="Full screen: hides the browser (Esc to leave)">⛶ Full screen</button>
+        <button type="button" id="fs-toggle" class="btn fs-toggle" title="Full screen: hides the browser (Esc to leave)"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-maximize-2"/></svg><span>Full screen</span></button>
       </header>
       <section id="view"></section>
     </main>
@@ -73,8 +85,15 @@
       <div id="modal-body"></div>
     </div>
   </div>
+  <div id="palette" class="palette hidden" role="dialog" aria-modal="true" aria-label="Go to">
+    <div class="palette-card">
+      <div class="palette-input"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg><input id="palette-q" placeholder="Jump to a page, run an action, or search everything…" autocomplete="off" spellcheck="false"><kbd>Esc</kbd></div>
+      <ul id="palette-list" role="listbox"></ul>
+      <div class="palette-foot muted"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>Enter</kbd> open</span><span><kbd>Ctrl</kbd><kbd>K</kbd> anywhere</span></div>
+    </div>
+  </div>
   <div id="toast" class="toast hidden"></div>
-  <button type="button" id="fs-exit" class="fs-exit hidden" title="Exit full screen (Esc)" aria-label="Exit full screen">✕</button>
+  <button type="button" id="fs-exit" class="fs-exit hidden" title="Exit full screen (Esc)" aria-label="Exit full screen"><svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-x"/></svg></button>
 
   <script src="/static/app.js"></script>
 </body>

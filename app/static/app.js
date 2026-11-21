@@ -222,13 +222,95 @@ $("#login-form").addEventListener("submit", async (e) => {
   }
 });
 
+// A line icon from static/icons.svg (Lucide, ISC licence).
+const icon = (name) => `<svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-${name}"/></svg>`;
+const liveLabel = (on) => on ? `${icon("pause")}<span>Pause</span>` : `${icon("play")}<span>Live</span>`;
+
+// Sidebar: collapses to icons only (button at the bottom, or Ctrl+B); remembered in this browser.
+function setNavCollapsed(on, save = true) {
+  document.body.classList.toggle("nav-collapsed", on);
+  const b = $("#nav-collapse");
+  b.innerHTML = icon(on ? "panel-left-open" : "panel-left-close");
+  b.title = on ? "Expand the sidebar (Ctrl+B)" : "Collapse the sidebar (Ctrl+B)";
+  if (save) try { localStorage.setItem("kastec-nav", on ? "collapsed" : "open"); } catch (e) { /* not remembered */ }
+}
+try { setNavCollapsed(localStorage.getItem("kastec-nav") === "collapsed", false); } catch (e) { setNavCollapsed(false, false); }
+$("#nav-collapse").addEventListener("click", () => setNavCollapsed(!document.body.classList.contains("nav-collapsed")));
+
+// Command palette (Ctrl+K): jump to any page, run an action, or search everything.
+const palette = { items: [], sel: 0 };
+function paletteItems(q) {
+  const pages = [];
+  let group = "Page";
+  document.querySelectorAll("nav > *").forEach((el) => {
+    if (el.classList.contains("nav-group")) { group = el.textContent; return; }
+    if (el.hasAttribute("data-admin") && !isAdmin()) return;
+    pages.push({ label: el.textContent.trim(), hint: group, icon: el.querySelector("use")?.getAttribute("href").split("#i-")[1],
+                 go: () => { location.hash = el.getAttribute("href"); } });
+  });
+  const theme = document.documentElement.dataset.theme;
+  const actions = [
+    { label: theme === "dark" ? "Switch to light theme" : "Switch to dark theme", hint: "Action", icon: theme === "dark" ? "sun" : "moon", go: () => setTheme(theme === "dark" ? "light" : "dark") },
+    { label: "Theme: follow Windows", hint: "Action", icon: "monitor", go: () => setTheme("auto") },
+    { label: document.fullscreenElement ? "Exit full screen" : "Full screen", hint: "Action", icon: "maximize-2", go: toggleAppFullscreen },
+    { label: document.body.classList.contains("nav-collapsed") ? "Expand the sidebar" : "Collapse the sidebar", hint: "Action  Ctrl+B", icon: "panel-left-close", go: () => setNavCollapsed(!document.body.classList.contains("nav-collapsed")) },
+    { label: "Refresh this page", hint: "Action", icon: "refresh-cw", go: () => route() },
+    { label: "Sign out", hint: "Action", icon: "log-out", go: () => $("#logout").click() },
+  ];
+  const all = [...pages, ...actions];
+  const t = q.trim().toLowerCase();
+  // Score: starts with the text > a word starts with it > contains it > its letters in order.
+  const score = (label) => { const l = label.toLowerCase(); if (!t) return 1; if (l.startsWith(t)) return 4;
+    if (l.split(/[\s()]+/).some((w) => w.startsWith(t))) return 3; if (l.includes(t)) return 2;
+    let i = 0; for (const ch of l) if (ch === t[i]) i++; return i === t.length ? 1 : 0; };
+  const found = all.map((x) => ({ ...x, s: score(x.label) })).filter((x) => x.s).sort((a, b) => b.s - a.s);
+  if (t) found.push({ label: `Search everything for “${q.trim()}”`, hint: "Users, groups, computers, VMs", icon: "search",
+                      go: () => { location.hash = `#/search/${encodeURIComponent(q.trim())}`; } });
+  return found;
+}
+function paletteDraw() {
+  const q = $("#palette-q").value;
+  palette.items = paletteItems(q);
+  palette.sel = Math.min(palette.sel, Math.max(0, palette.items.length - 1));
+  $("#palette-list").innerHTML = palette.items.map((x, i) => `<li role="option" data-i="${i}" aria-selected="${i === palette.sel}">
+      ${icon(x.icon || "arrow-right")}<span class="pl">${esc(x.label)}</span><span class="ph">${esc(x.hint || "")}</span>
+      ${i === palette.sel ? icon("corner-down-left") : ""}</li>`).join("") || '<li class="muted empty">Nothing matches</li>';
+  $("#palette-list").querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+}
+function paletteOpen() {
+  if (!state.me) return;
+  $("#palette").classList.remove("hidden");
+  $("#palette-q").value = ""; palette.sel = 0; paletteDraw(); $("#palette-q").focus();
+}
+function paletteClose() { $("#palette").classList.add("hidden"); }
+function paletteRun(i) { const x = palette.items[i]; paletteClose(); x?.go(); }
+$("#palette-open").addEventListener("click", paletteOpen);
+$("#palette-q").addEventListener("input", () => { palette.sel = 0; paletteDraw(); });
+$("#palette-q").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); palette.sel = (palette.sel + 1) % Math.max(1, palette.items.length); paletteDraw(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); palette.sel = (palette.sel - 1 + palette.items.length) % Math.max(1, palette.items.length); paletteDraw(); }
+  else if (e.key === "Enter") { e.preventDefault(); paletteRun(palette.sel); }
+  else if (e.key === "Escape") { e.preventDefault(); paletteClose(); }
+});
+$("#palette-list").addEventListener("click", (e) => { const li = e.target.closest("[data-i]"); if (li) paletteRun(Number(li.dataset.i)); });
+$("#palette").addEventListener("mousedown", (e) => { if (e.target.id === "palette") paletteClose(); });
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "k") {
+    if (document.querySelector(".xterm-helper-textarea") === document.activeElement) return;   // the terminal keeps its own keys
+    e.preventDefault(); $("#palette").classList.contains("hidden") ? paletteOpen() : paletteClose();
+  } else if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "b" && state.me
+             && !["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName) && !document.activeElement?.closest?.(".xterm")) {
+    e.preventDefault(); setNavCollapsed(!document.body.classList.contains("nav-collapsed"));
+  }
+});
+
 // Full screen for the whole of KasTec: hides the browser's tabs and address bar. Esc (the browser's own key),
 // the ✕ in the corner, or the button again leaves it.
 function syncFullscreen() {
   const app = document.fullscreenElement === document.documentElement;
   document.body.classList.toggle("app-full", app);
   $("#fs-exit").classList.toggle("hidden", !app);
-  $("#fs-toggle").textContent = app ? "✕ Exit full screen" : "⛶ Full screen";
+  $("#fs-toggle").innerHTML = app ? `${icon("minimize-2")}<span>Exit full screen</span>` : `${icon("maximize-2")}<span>Full screen</span>`;
 }
 async function toggleAppFullscreen() {
   try {
@@ -962,7 +1044,7 @@ async function showNetwork(box, conn) {
   box.innerHTML = `<div class="toolbar net-toolbar">
       <label class="inline">Cluster <select id="net-cluster">${topo.clusters.map((c) => `<option ${c === n.cluster ? "selected" : ""}>${esc(c)}</option>`).join("")}</select></label>
       <div class="segmented" id="net-limit">${[[25, "Busiest 25 VMs"], [0, "All VMs"]].map(([v, l]) => `<button data-l="${v}" class="${n.limit === v ? "active" : ""}">${l}</button>`).join("")}</div>
-      <button class="btn" id="net-live">${n.live ? "❚❚ Pause" : "▶ Live"}</button>
+      <button class="btn" id="net-live">${liveLabel(n.live)}</button>
       <button class="btn" id="net-relayout" title="Read the layout from vCenter again">Reload layout</button>
       <span class="muted" id="net-updated"></span></div>
     <div id="net-stats" class="act-kpis"></div>
@@ -976,7 +1058,7 @@ async function showNetwork(box, conn) {
   $("#net-cluster").onchange = (e) => { n.cluster = e.target.value; draw(); };
   box.querySelectorAll("#net-limit button").forEach((b) => b.onclick = () => { n.limit = Number(b.dataset.l);
     box.querySelectorAll("#net-limit button").forEach((x) => x.classList.toggle("active", x === b)); draw(); });
-  $("#net-live").onclick = () => { n.live = !n.live; $("#net-live").textContent = n.live ? "❚❚ Pause" : "▶ Live"; $("#net-wrap").classList.toggle("paused", !n.live); };
+  $("#net-live").onclick = () => { n.live = !n.live; $("#net-live").innerHTML = liveLabel(n.live); $("#net-wrap").classList.toggle("paused", !n.live); };
   $("#net-relayout").onclick = () => { n.refresh = true; showNetwork(box, conn); };
 
   let model;
@@ -1213,9 +1295,9 @@ async function renderEcosystem() {
   view.innerHTML = `<div class="page-head"><div><h1>Ecosystem</h1>
       <p class="muted" style="margin:0">How everything connects, from the internet through the FortiGate and switches to the ESXi hosts, with live traffic
         on every link. Built from the FortiGate, SolarWinds, vCenter and NetFlow. Read-only.</p></div>
-      <div class="row"><button class="btn" id="eco-live">${e.live ? "❚❚ Pause" : "▶ Live"}</button><button class="btn" id="eco-refresh">Refresh</button></div></div>
+      <div class="row"><button class="btn" id="eco-live">${liveLabel(e.live)}</button><button class="btn" id="eco-refresh">${icon("refresh-cw")}<span>Refresh</span></button></div></div>
     <div id="eco-body"><p class="muted">Reading the firewall, switches and vCenter… the first time can take a minute.</p></div>`;
-  $("#eco-live").onclick = () => { e.live = !e.live; $("#eco-live").textContent = e.live ? "❚❚ Pause" : "▶ Live"; $("#eco-wrap")?.classList.toggle("paused", !e.live); };
+  $("#eco-live").onclick = () => { e.live = !e.live; $("#eco-live").innerHTML = liveLabel(e.live); $("#eco-wrap")?.classList.toggle("paused", !e.live); };
   $("#eco-refresh").onclick = renderEcosystem;
   const box = $("#eco-body"), token = state.ecoSeq = (state.ecoSeq || 0) + 1;
   const stale = () => token !== state.ecoSeq || !box.isConnected;   // refreshed again, or another page is showing now
@@ -1810,7 +1892,7 @@ async function showVm(connId, vmId) {
     // Connect: RDP for Windows, SSH for Linux (both when the guest OS isn't known), to its name or address.
     const target = v.hostname || v.ip_address || v.name, win = isWindowsOs(v.guest_os), lin = isLinuxOs(v.guest_os);
     const connectBar = `<div class="connect-bar"><b>Connect</b>
-      ${!lin ? `<a class="btn" href="${rdpUrl(target, v.name)}" title="Opens Remote Desktop on your PC">🖥 Remote Desktop</a>` : ""}
+      ${!lin ? `<a class="btn" href="${rdpUrl(target, v.name)}" title="Opens Remote Desktop on your PC">${icon("monitor")}<span>Remote Desktop</span></a>` : ""}
       ${!win && isAdmin() ? '<button class="btn" id="vm-ssh">⌨ SSH terminal</button>' : ""}
       <span class="muted small-note" style="margin:0">to ${esc(target)}</span></div>`;
     const gr = isAdmin() ? guestRunPanel(connId, v) : null;
@@ -3667,6 +3749,8 @@ function start() {
   document.querySelectorAll("[data-admin]").forEach((el) => el.classList.toggle("hidden", !isAdmin()));
   $("#whoami-name").textContent = state.me.display_name || state.me.username;
   $("#whoami-role").textContent = ROLE_INFO[state.me.role]?.[0] ?? state.me.role;
+  const who = (state.me.display_name || state.me.username || "?").trim();
+  $("#whoami-initials").textContent = who.split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
   route();
 }
 
