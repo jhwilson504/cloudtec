@@ -2996,13 +2996,13 @@ async function renderDCs() {
           ${stat("Reachable on 9389", `${count((d) => d.ports["9389"])} / ${dcs.length}`, "needed by PowerShell AD commands")}
         </div>
         ${table(["Domain controller", "Site", "Operating system", "Roles", "Ports from this computer", "Last logon", ""], dcs.map((d, i) => `<tr>
-          <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div></td>
+          <td><b>${esc(d.name)}</b><div class="sub">${esc(d.dns_name || "")}</div>${d.ip ? `<div class="sub mono">${esc(d.ip)}</div>` : ""}</td>
           <td>${esc(d.site || "–")}</td>
           <td>${esc(d.os || "–")}<div class="sub">${esc(d.os_version || "")}</div></td>
           <td>${roleBadges(d)}</td>
           <td style="white-space:nowrap">${portBadges(d)}</td>
           <td>${fmtDate(d.last_logon)}</td>
-          <td class="actions"><a class="btn small" href="${rdpUrl(d.dns_name || d.name, d.name)}" title="Opens Remote Desktop on your PC">RDP</a>
+          <td class="actions"><a class="btn small" href="${rdpUrl(d.ip || d.dns_name || d.name, d.name)}" title="Opens Remote Desktop on your PC to ${esc(d.ip || d.dns_name || d.name)}">RDP</a>
             ${isAdmin() ? `<button class="btn small danger" data-restart="${i}">Restart</button>` : ""}</td></tr>`), "No domain controllers found.")}
         <p class="muted small-note">Ports: ${Object.entries(ports).map(([p, l]) => `${p} ${esc(l)}`).join(" · ")}.
           Green means the computer running KasTec can connect to that port; red means it can't (firewall, or the service isn't running).</p>`;

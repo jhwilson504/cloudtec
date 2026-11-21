@@ -234,6 +234,7 @@ def test_domain_controllers_endpoint(client):
     assert r["ports"]["9389"] == "AD Web Services"
     assert r["dcs"] and all(set(d["ports"]) == {"389", "636", "3268", "9389"} for d in r["dcs"])
     assert any("PDC" in d["roles"] for d in r["dcs"])
+    assert all(d["ip"] and d["ip"].count(".") == 3 for d in r["dcs"])     # Remote Desktop connects by address
 
 
 def test_idrac_servers(client):

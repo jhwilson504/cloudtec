@@ -772,8 +772,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results = list(pool.map(lambda x: port_open(x[0]["dns_name"] or x[0]["name"], x[1]), checks))
             for (dc, port), ok in zip(checks, results):
                 dc.setdefault("ports", {})[str(port)] = ok
+        # Each DC's IPv4 address as this computer's DNS sees it (Remote Desktop connects by address).
+        missing = [dc for dc in dcs if not dc.get("ip")]
+        if missing:
+            with ThreadPoolExecutor(max_workers=min(16, len(missing))) as pool:
+                for dc, ip in zip(missing, pool.map(lambda d: ipv4_of(d.get("dns_name") or d["name"]), missing)):
+                    dc["ip"] = ip or (f"10.0.0.{10 + dcs.index(dc)}" if conn.demo else None)
         return {"dcs": dcs, "ports": {str(p): label for p, label in DC_PORTS.items()},
                 "configured_dc": conn.config.get("host"), "connected_via": via}
+
+    def ipv4_of(host: str) -> str | None:
+        try:
+            return socket.getaddrinfo(host, None, socket.AF_INET)[0][4][0]
+        except (OSError, IndexError, UnicodeError):
+            return None
 
     def find_dc(conn: Connection, name: str) -> tuple[dict, list[dict]]:
         name = name.strip()
