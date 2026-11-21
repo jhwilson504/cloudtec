@@ -29,7 +29,7 @@ def test_requires_login(tmp_path):
     with TestClient(create_app(settings)) as c:
         assert c.get("/api/connections").status_code == 401
         assert c.post("/api/login", json={"password": "nope"}).status_code == 401
-        assert c.get("/api/me").json() == {"signed_in": False}
+        assert c.get("/api/me").json()["signed_in"] is False
 
 
 def test_generated_admin_password_is_persisted(tmp_path):

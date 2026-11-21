@@ -271,8 +271,41 @@ function rememberedUsername() {
   try { return localStorage.getItem("cloudtec.username") || "admin"; } catch { return "admin"; }
 }
 
+// Sign-in background: a slow drifting network of points, the nearest ones joined by faint lines.
+const mesh = { raf: 0 };
+function startMesh() {
+  const cv = $("#login-mesh"), ctx = cv.getContext("2d");
+  cancelAnimationFrame(mesh.raf);
+  const fit = () => { const r = devicePixelRatio || 1; cv.width = innerWidth * r; cv.height = innerHeight * r; ctx.setTransform(r, 0, 0, r, 0, 0); };
+  fit(); addEventListener("resize", fit);
+  const n = Math.round(Math.min(90, innerWidth * innerHeight / 16000));
+  mesh.pts ||= Array.from({ length: n }, () => ({ x: Math.random() * innerWidth, y: Math.random() * innerHeight,
+    vx: (Math.random() - .5) * .25, vy: (Math.random() - .5) * .25, r: 1 + Math.random() * 1.6 }));
+  const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const draw = () => {
+    const cs = getComputedStyle(document.documentElement), accent = cs.getPropertyValue("--accent").trim() || "#4f8bff";
+    ctx.clearRect(0, 0, innerWidth, innerHeight);
+    for (const p of mesh.pts) {
+      if (!still) { p.x += p.vx; p.y += p.vy; if (p.x < 0 || p.x > innerWidth) p.vx *= -1; if (p.y < 0 || p.y > innerHeight) p.vy *= -1; }
+    }
+    ctx.strokeStyle = accent; ctx.fillStyle = accent;
+    for (let i = 0; i < mesh.pts.length; i++) {
+      const a = mesh.pts[i];
+      for (let j = i + 1; j < mesh.pts.length; j++) {
+        const b = mesh.pts[j], d = Math.hypot(a.x - b.x, a.y - b.y);
+        if (d < 150) { ctx.globalAlpha = (1 - d / 150) * .22; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke(); }
+      }
+      ctx.globalAlpha = .55; ctx.beginPath(); ctx.arc(a.x, a.y, a.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    if (!still && !$("#login").classList.contains("hidden")) mesh.raf = requestAnimationFrame(draw);
+  };
+  draw();
+}
+
 function showLogin() {
   state.me = null;
+  startMesh();
   $("#shell").classList.add("hidden");
   $("#login").classList.remove("hidden");
   const user = $("#login-username");
@@ -326,7 +359,7 @@ async function drawStatusBar() {
   bar.innerHTML = `<div class="sb-conns">${items || '<span class="muted">No connections yet</span>'}</div>
     <span class="sb-meta" title="Response times are a plain network connection to each server, checked every 20–30 seconds">
       Checked ${new Date(s.checked * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}</span>
-    <span class="sb-meta">KasTec ${esc(s.version)}</span>`;
+    <span class="sb-meta"><a href="#/about" title="About KasTec">KasTec ${esc(s.version)}</a></span>`;
 }
 setInterval(() => { if (state.me && !document.hidden) drawStatusBar(); }, 30000);
 
@@ -467,6 +500,39 @@ $("#global-search").addEventListener("submit", (e) => {
   const q = $("#global-q").value.trim();
   if (q) location.hash = `#/search/${encodeURIComponent(q)}`;
 });
+
+// ---- about -----------------------------------------------------------------
+
+async function renderAbout() {
+  loading();
+  const a = await api("GET", "/api/about");
+  const up = a.uptime_s < 3600 ? `${Math.round(a.uptime_s / 60)} min` : a.uptime_s < 86400 ? `${(a.uptime_s / 3600).toFixed(1)} h` : `${(a.uptime_s / 86400).toFixed(1)} days`;
+  const conns = Object.entries(a.connections).map(([k, n]) => `${n} ${KIND_SHORT[k] || k}`).join(" · ") || "none yet";
+  view.innerHTML = `<div class="about-hero card">
+      <img src="/static/logo.svg" alt="" class="about-logo">
+      <div><h1 style="margin:0">Kas<span class="tec">Tec</span> Center</h1>
+        <p class="muted" style="margin:4px 0 0">One console for Active Directory, vSphere, iDRAC, SolarWinds, VNX and FortiGate.</p></div>
+      <div class="about-ver"><span class="muted">Version</span><b class="mono">${esc(a.version)}</b></div></div>
+    <div class="grid about-grid">
+      <div class="card"><h2>This installation</h2><dl class="kv">
+        <dt>Running on</dt><dd class="mono">${esc(a.computer)}</dd>
+        <dt>Addresses</dt><dd class="mono">${esc(a.addresses.join(", ") || "–")}</dd>
+        <dt>Up for</dt><dd>${up}</dd>
+        <dt>Python</dt><dd class="mono">${esc(a.python)}</dd>
+        <dt>PowerShell</dt><dd>${a.powershell ? '<span class="badge ok">available</span>' : '<span class="badge plain">not found</span>'}</dd>
+        <dt>NetFlow</dt><dd>${a.netflow ? '<span class="badge ok">collecting</span>' : '<span class="badge plain">off</span>'}</dd>
+        <dt>Connections</dt><dd>${esc(conns)}</dd></dl></div>
+      <div class="card"><h2>Security</h2><ul class="about-list">
+        <li>Connection passwords and API tokens are encrypted at rest and never sent back to the browser.</li>
+        <li>Guest and SSH passwords are used once and not stored.</li>
+        <li>Risky actions are admin-only and written to the audit log.</li>
+        <li>Employee activity never records keystrokes or screenshots.</li></ul></div>
+    </div>
+    <div class="section"><h2>Open-source parts</h2>
+      ${table(["Component", "Used for", "Licence"], a.components.map((c) => `<tr><td><b>${esc(c.name)}</b></td><td>${esc(c.use)}</td>
+        <td>${c.file ? `<a href="${esc(c.file)}" target="_blank" rel="noopener">${esc(c.licence)}</a>` : esc(c.licence)}</td></tr>`))}</div>
+    <p class="muted small-note">Press <kbd>Ctrl</kbd><kbd>K</kbd> anywhere to jump to a page or action, and <kbd>Ctrl</kbd><kbd>B</kbd> to fold the sidebar.</p>`;
+}
 
 // ---- dashboard -----------------------------------------------------------
 
@@ -3833,10 +3899,28 @@ const routes = {
   settings: renderSettings,
   certificates: renderCertificates,
   users: renderUsers,
+  about: renderAbout,
   search: (arg) => renderSearch(decodeURIComponent(arg || "")),
 };
 
 const ADMIN_ROUTES = new Set(["connections", "users", "powershell", "activity"]);
+
+// Page headers: a long description moves into a "?" beside the title, so every header is a title and one line.
+function tidyHeader() {
+  const head = view.querySelector(".page-head"), p = head?.querySelector(":scope > div > p, :scope > p");
+  if (!p || p.dataset.tidy || p.textContent.trim().length <= 110) return;
+  p.dataset.tidy = "1";
+  const h1 = head.querySelector("h1");
+  if (!h1) return;
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "help-q"; b.title = "About this page"; b.setAttribute("aria-expanded", "false");
+  b.innerHTML = icon("circle-help");
+  const pop = document.createElement("div");
+  pop.className = "help-pop hidden"; pop.innerHTML = p.innerHTML;
+  p.classList.add("hidden");
+  h1.append(b); h1.after(pop);
+  b.onclick = () => { const open = pop.classList.toggle("hidden"); b.setAttribute("aria-expanded", String(!open)); };
+}
 
 async function route() {
   const [, name = "dashboard", arg] = location.hash.split("/");
@@ -3863,6 +3947,7 @@ async function route() {
     return;
   }
   state.routeDone = seq;
+  tidyHeader();
   if (state.clobbered) route();
   else if (error) view.innerHTML = `<div class="notice bad">${esc(error.message)}</div>`;
 }
@@ -3880,4 +3965,4 @@ function start() {
 }
 
 window.addEventListener("hashchange", route);
-api("GET", "/api/me").then((r) => { if (r.signed_in) { state.me = r; start(); } else showLogin(); }).catch(showLogin);
+api("GET", "/api/me").then((r) => { $("#login-version").textContent = `KasTec Center ${r.version || ""}`.trim(); if (r.signed_in) { state.me = r; start(); } else showLogin(); }).catch(showLogin);

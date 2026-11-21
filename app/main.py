@@ -389,7 +389,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/me")
     def me(request: Request):
         user = lookup(sessions.user(request.cookies.get(COOKIE)))
-        return {"signed_in": True, **user} if user else {"signed_in": False}
+        return {"signed_in": True, "version": APP_VERSION, **user} if user else {"signed_in": False, "version": APP_VERSION}
 
     api = [Depends(require_session)]
     admin_only = [Depends(require_admin)]
@@ -849,6 +849,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         t0 = time.perf_counter()
         ok = port_open(host, port, timeout=2)
         return {**out, "ok": ok, "ms": round((time.perf_counter() - t0) * 1000, 1) if ok else None}
+
+    started = time.time()
+
+    @app.get("/api/about", dependencies=api)
+    def about():
+        """Version, where KasTec is running, what it's connected to, and the open-source parts it ships with."""
+        kinds: dict = {}
+        for c in store.list():
+            kinds[c.kind] = kinds.get(c.kind, 0) + 1
+        return {
+            "version": APP_VERSION, "uptime_s": round(time.time() - started), "computer": socket.gethostname(),
+            "addresses": sorted(a for a in this_computer_addresses() if a not in ("127.0.0.1", "::1", "localhost")),
+            "python": ".".join(map(str, __import__("sys").version_info[:3])), "powershell": bool(exe),
+            "connections": kinds, "netflow": bool(flow_collector.settings().get("enabled")),
+            "components": [
+                {"name": "Geist and Geist Mono", "use": "Typefaces", "licence": "SIL Open Font License 1.1", "file": "/static/fonts/Geist-LICENSE.txt"},
+                {"name": "Lucide", "use": "Icons", "licence": "ISC", "file": "/static/icons-LICENSE.txt"},
+                {"name": "xterm.js", "use": "SSH and PowerShell terminal", "licence": "MIT", "file": "/static/vendor/xterm-LICENSE.txt"},
+                {"name": "FastAPI, Uvicorn, httpx, ldap3, cryptography", "use": "Server", "licence": "MIT / BSD / Apache 2.0", "file": None},
+            ],
+        }
 
     @app.get("/api/status", dependencies=api)
     def status_bar():
