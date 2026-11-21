@@ -540,3 +540,48 @@ td { font-variant-numeric: tabular-nums; }
 /* Diagrams use the same faces. */
 .net-svg { font-family: var(--font-ui); font-variant-numeric: tabular-nums; }
 .net-svg .colhead { font-size: 10.5px; font-weight: 650; letter-spacing: .07em; }
+
+/* ---- Design pass 2: calmer colour --------------------------------------------------------------
+   Colour is kept for problems. Healthy states are neutral with a small green dot, labels (roles,
+   catalog) are plain chips, and dangerous buttons are quiet until you point at them. Dark mode has
+   layered surfaces: page, card and raised parts are each a step lighter. */
+:root { --bg: #f5f6f8; --panel: #ffffff; --panel-2: #f8f9fb; --border: #e4e7ec; --border-strong: #d3d8e0;
+        --dot-ok: #16a34a; --raise: #ffffff;
+        --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .04); }
+:root[data-theme="dark"] { --bg: #0b0f14; --panel: #11161d; --panel-2: #161c25; --raise: #1b222c; --border: #222b36;
+        --border-strong: #2e3946; --muted: #8b97a6; --dot-ok: #3fcf6e;
+        --shadow: 0 0 0 1px rgba(255, 255, 255, .02), 0 1px 2px rgba(0, 0, 0, .4); }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) { --bg: #0b0f14; --panel: #11161d; --panel-2: #161c25; --raise: #1b222c; --border: #222b36;
+        --border-strong: #2e3946; --muted: #8b97a6; --dot-ok: #3fcf6e;
+        --shadow: 0 0 0 1px rgba(255, 255, 255, .02), 0 1px 2px rgba(0, 0, 0, .4); }
+}
+
+/* Badges: "ok" is a neutral chip with a green dot; problems keep their colour. */
+.badge { font-size: 11.5px; font-weight: 550; padding: 2px 8px; border: 1px solid transparent; line-height: 1.5; }
+.badge.ok { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+.badge.ok::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--dot-ok);
+  margin-right: 6px; vertical-align: 1px; }
+.badge.info, .badge.chip { background: var(--panel-2); color: var(--text); border-color: var(--border); }
+.badge.bad { border-color: color-mix(in srgb, var(--bad) 30%, transparent); }
+.badge.warn { border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+
+/* Ports: a dot and the number, not a pill each. */
+.port { display: inline-flex; align-items: center; gap: 5px; margin-right: 12px; font-family: var(--font-mono);
+  font-size: 12px; color: var(--muted); }
+.port::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--dot-ok); }
+.port.down { color: var(--bad); font-weight: 600; }
+.port.down::before { background: var(--bad); box-shadow: 0 0 0 3px color-mix(in srgb, var(--bad) 22%, transparent); }
+
+/* Buttons: links-as-buttons lose their underline; danger is quiet until hovered. */
+a.btn { text-decoration: none; }
+.btn { border-color: var(--border-strong); transition: background .12s, border-color .12s, color .12s; }
+.btn.danger { color: var(--muted); }
+.btn.danger:hover { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 55%, transparent);
+  background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.btn.primary:hover { filter: brightness(1.08); background: var(--accent); }
+
+/* Surfaces: table headers and raised controls sit a step above the card. */
+.card { box-shadow: var(--shadow); }
+th { background: var(--panel-2); }
+.sidebar { background: var(--panel); }

@@ -2979,12 +2979,12 @@ async function renderDCs() {
       const stat = (label, value, sub = "") =>
         `<div class="card stat"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${sub}</div></div>`;
       const roleBadges = (d) => [
-        d.global_catalog ? '<span class="badge info">Global Catalog</span>' : "",
+        d.global_catalog ? '<span class="badge chip">Global Catalog</span>' : "",
         d.read_only ? '<span class="badge warn">Read-only</span>' : "",
-        ...d.roles.map((r) => `<span class="badge ok" title="FSMO role">${esc(r)}</span>`),
+        ...d.roles.map((r) => `<span class="badge chip" title="FSMO role">${esc(r)}</span>`),
       ].join(" ") || '<span class="muted">–</span>';
       const portBadges = (d) => Object.entries(ports).map(([p, label]) =>
-        `<span class="badge ${d.ports[p] ? "ok" : "bad"}" title="${esc(label)}: ${d.ports[p] ? "reachable" : "not reachable"} from this computer">${p}</span>`).join(" ");
+        `<span class="port ${d.ports[p] ? "up" : "down"}" title="${esc(label)}: ${d.ports[p] ? "reachable" : "not reachable"} from this computer">${p}</span>`).join("");
 
       const conn = conns.find((c) => c.id === state.ad);
       box.innerHTML = `${failedOver ? `<div class="notice bad" style="margin-bottom:14px">
