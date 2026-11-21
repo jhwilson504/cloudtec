@@ -12,7 +12,32 @@ function esc(value) {
   }[c]));
 }
 
+// The button you just pressed shows a spinner while the request it started is running.
+const busyButtons = new Map();   // button -> requests still running
+let lastPressed = null;
+document.addEventListener("click", (e) => {
+  const b = e.target.closest?.("button.btn, a.btn");
+  lastPressed = b && !b.closest("#palette") ? { b, t: performance.now() } : null;
+}, true);
+document.addEventListener("submit", (e) => {
+  const b = e.submitter?.matches?.(".btn") ? e.submitter : e.target.querySelector?.("button.btn.primary, button[type=submit].btn");
+  if (b) lastPressed = { b, t: performance.now() };
+}, true);
+
 async function api(method, path, body) {
+  const pressed = lastPressed && performance.now() - lastPressed.t < 400 && lastPressed.b.isConnected ? lastPressed.b : null;
+  if (!pressed) return apiRaw(method, path, body);
+  busyButtons.set(pressed, (busyButtons.get(pressed) || 0) + 1);
+  const timer = setTimeout(() => pressed.classList.add("busy"), 150);   // quick answers don't flicker
+  try { return await apiRaw(method, path, body); }
+  finally {
+    clearTimeout(timer);
+    const n = busyButtons.get(pressed) - 1;
+    if (n > 0) busyButtons.set(pressed, n); else { busyButtons.delete(pressed); pressed.classList.remove("busy"); }
+  }
+}
+
+async function apiRaw(method, path, body) {
   let res;
   try {
     res = await fetch(path, {
@@ -39,11 +64,15 @@ async function api(method, path, body) {
 }
 
 function toast(msg, bad = false) {
-  const el = $("#toast");
-  el.textContent = msg;
+  const el = $("#toast"), ms = bad ? 7000 : 4000;
+  el.innerHTML = `<svg class="ic" aria-hidden="true"><use href="/static/icons.svg#i-${bad ? "triangle-alert" : "circle-check"}"/></svg>
+    <span class="msg">${esc(msg)}</span><button type="button" class="x" aria-label="Close">&times;</button>
+    <span class="bar" style="animation-duration:${ms}ms"></span>`;
   el.className = "toast" + (bad ? " bad" : "");
+  el.setAttribute("role", bad ? "alert" : "status");
+  el.querySelector(".x").onclick = () => el.classList.add("hidden");
   clearTimeout(toast.t);
-  toast.t = setTimeout(() => el.classList.add("hidden"), 4000);
+  toast.t = setTimeout(() => el.classList.add("hidden"), ms);
 }
 
 function fmtDate(iso) {
@@ -77,7 +106,50 @@ function table(headers, rows, emptyMsg = "Nothing found.") {
     <tbody>${rows.join("")}</tbody></table></div>`;
 }
 
-function loading() { view.innerHTML = '<p class="muted">Loading…</p>'; }
+// While a page loads: grey placeholders in the shape of a page (title, figures, table), gently shimmering.
+function skeleton(rows = 6) {
+  return `<div class="skel-page" aria-busy="true" aria-label="Loading">
+    <div class="skel skel-title"></div><div class="skel skel-line" style="width:38%"></div>
+    <div class="skel-kpis">${'<div class="skel skel-kpi"></div>'.repeat(4)}</div>
+    <div class="skel-table">${Array.from({ length: rows }, (_, i) => `<div class="skel skel-row" style="width:${96 - (i % 3) * 7}%"></div>`).join("")}</div></div>`;
+}
+function loading() { view.innerHTML = skeleton(); }
+// Inside a page: what it's doing, over placeholder table rows.
+function waiting(msg, rows = 6) {
+  return `<p class="muted small-note" style="margin:0 0 12px">${msg}</p><div class="skel-table" aria-busy="true">${
+    Array.from({ length: rows }, (_, i) => `<div class="skel skel-row" style="width:${96 - (i % 3) * 7}%"></div>`).join("")}</div>`;
+}
+
+// Big figures count to their new value instead of jumping (the first number in the figure; the rest stays).
+const shownFigures = new Map();
+function countUp(el) {
+  const node = [...el.childNodes].find((n) => n.nodeType === 3 && /\d/.test(n.textContent));
+  if (!node || el.dataset.counting) return;
+  const m = node.textContent.match(/^(\D*?)(\d[\d,]*(?:\.\d+)?)(.*)$/s);
+  if (!m) return;
+  const target = parseFloat(m[2].replace(/,/g, "")), decimals = (m[2].split(".")[1] || "").length, comma = m[2].includes(",");
+  const key = `${location.hash}|${el.parentElement?.textContent.replace(/[\d.,]+/g, "#").trim().slice(0, 80)}`;
+  const from = shownFigures.has(key) ? shownFigures.get(key) : 0;
+  shownFigures.set(key, target);
+  if (from === target || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const fmt = (v) => comma ? v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals }) : v.toFixed(decimals);
+  const t0 = performance.now(), dur = from ? 450 : 700;
+  el.dataset.counting = "1";
+  const step = (t) => {
+    const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+    if (!node.isConnected) { delete el.dataset.counting; return; }
+    node.textContent = m[1] + fmt(from + (target - from) * e) + m[3];
+    if (k < 1) requestAnimationFrame(step); else delete el.dataset.counting;
+  };
+  requestAnimationFrame(step);
+}
+new MutationObserver((list) => {
+  for (const r of list) for (const n of r.addedNodes) {
+    if (n.nodeType !== 1) continue;
+    if (n.matches?.(".stat .value, .act-kpi .v")) countUp(n);
+    n.querySelectorAll?.(".stat .value, .act-kpi .v").forEach(countUp);
+  }
+}).observe(document.getElementById("view"), { childList: true, subtree: true });
 
 function errorsNotice(errors) {
   if (!errors?.length) return "";
@@ -871,7 +943,7 @@ async function renderDirectory() {
     <div class="toolbar">${connectionPicker(conns, state.ad, "ad-conn")}
       <input type="search" id="ad-q" placeholder="Search ${state.adTab}…">
       <span class="muted" id="ad-count"></span></div>
-    <div id="ad-results"><p class="muted">Loading…</p></div>`;
+    <div id="ad-results">${waiting("Loading…")}</div>`;
 
   view.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { state.adTab = b.dataset.tab; renderDirectory(); });
   $("#ad-conn")?.addEventListener("change", (e) => { state.ad = e.target.value; load(); });
@@ -1296,7 +1368,7 @@ async function renderEcosystem() {
       <p class="muted" style="margin:0">How everything connects, from the internet through the FortiGate and switches to the ESXi hosts, with live traffic
         on every link. Built from the FortiGate, SolarWinds, vCenter and NetFlow. Read-only.</p></div>
       <div class="row"><button class="btn" id="eco-live">${liveLabel(e.live)}</button><button class="btn" id="eco-refresh">${icon("refresh-cw")}<span>Refresh</span></button></div></div>
-    <div id="eco-body"><p class="muted">Reading the firewall, switches and vCenter… the first time can take a minute.</p></div>`;
+    <div id="eco-body"><p class="muted small-note" style="margin:0 0 12px">Reading the firewall, switches and vCenter… the first time can take a minute.</p>${skeleton(8)}</div>`;
   $("#eco-live").onclick = () => { e.live = !e.live; $("#eco-live").innerHTML = liveLabel(e.live); $("#eco-wrap")?.classList.toggle("paused", !e.live); };
   $("#eco-refresh").onclick = renderEcosystem;
   const box = $("#eco-body"), token = state.ecoSeq = (state.ecoSeq || 0) + 1;
@@ -1520,7 +1592,7 @@ async function renderVSphere() {
         <button class="btn" id="topo-csv">Export CSV</button><button class="btn" id="topo-print">Print / PDF</button>` : ""}
       <button class="btn" id="vs-refresh">Refresh</button>
       <span class="muted" id="vs-count"></span></div>
-    <div id="vs-results"><p class="muted">Loading…</p></div>`;
+    <div id="vs-results">${waiting("Loading…")}</div>`;
 
   view.querySelectorAll("[data-tab]").forEach((b) => b.onclick = () => { state.vsTab = b.dataset.tab; renderVSphere(); });
   $("#vs-conn")?.addEventListener("change", (e) => { state.vs = e.target.value; load(); });
@@ -1535,7 +1607,7 @@ async function renderVSphere() {
       return;
     }
     if (topo) {
-      box.innerHTML = '<p class="muted">Reading the whole inventory from vCenter…</p>';
+      box.innerHTML = waiting("Reading the whole inventory from vCenter…");
       try {
         const [t, sw] = await Promise.all([api("GET", `/api/vsphere/${state.vs}/topology`),
           api("GET", "/api/solarwinds/status").catch(() => null)]);
@@ -1932,11 +2004,11 @@ async function renderSolarWinds() {
 
   view.innerHTML = `${head}
     <div class="toolbar">${connectionPicker(conns, state.sw, "sw-conn")}</div>
-    <div id="sw-body"><p class="muted">Asking SolarWinds…</p></div>`;
+    <div id="sw-body">${waiting("Asking SolarWinds…")}</div>`;
 
   async function load() {
     const box = $("#sw-body");
-    box.innerHTML = '<p class="muted">Asking SolarWinds…</p>';
+    box.innerHTML = waiting("Asking SolarWinds…");
     let o;
     try {
       o = await api("GET", `/api/solarwinds/${state.sw}/overview`);
@@ -2625,11 +2697,11 @@ async function renderServers() {
       <button class="btn primary" id="srv-spec" disabled>Download spec sheet (CSV)</button>
       <button class="btn" id="srv-csv" disabled>Download every part (CSV)</button>
       <label class="inline"><input type="checkbox" id="srv-scrub"> Leave out host names, addresses and MACs (for sharing outside BTC)</label></div>
-    <div id="srv-body"><p class="muted">Asking each iDRAC…</p></div>`;
+    <div id="srv-body">${waiting("Asking each iDRAC…")}</div>`;
 
   async function load() {
     const box = $("#srv-body");
-    box.innerHTML = '<p class="muted">Asking each iDRAC…</p>';
+    box.innerHTML = waiting("Asking each iDRAC…");
     $("#srv-csv").disabled = $("#srv-spec").disabled = true;
     try {
       const servers = await api("GET", `/api/idrac/${state.idrac}/servers`);
@@ -3049,11 +3121,11 @@ async function renderDCs() {
 
   view.innerHTML = `${head}
     <div class="toolbar">${connectionPicker(conns, state.ad, "dc-conn")}</div>
-    <div id="dc-body"><p class="muted">Finding domain controllers and checking their ports…</p></div>`;
+    <div id="dc-body">${waiting("Finding domain controllers and checking their ports…")}</div>`;
 
   async function load() {
     const box = $("#dc-body");
-    box.innerHTML = '<p class="muted">Finding domain controllers and checking their ports…</p>';
+    box.innerHTML = waiting("Finding domain controllers and checking their ports…");
     try {
       const { dcs, ports, configured_dc, connected_via } = await api("GET", `/api/ad/${state.ad}/domain-controllers`);
       const failedOver = connected_via && configured_dc && connected_via.toLowerCase() !== configured_dc.toLowerCase();
