@@ -271,8 +271,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if shell:
             shell.close()
 
-    app = FastAPI(title="KasTec Center", docs_url="/api/docs", openapi_url="/api/openapi.json",
-                  lifespan=lifespan)
+    # The API description is for administrators only (see /api/docs below), not for anyone who can reach KasTec.
+    app = FastAPI(title="KasTec Center", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
 
     def sensitive_terms() -> list[str]:
         """Names and addresses from KasTec's own settings: always taken out of error reports."""
@@ -408,7 +408,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request.state.user = user
         audit(request, "signed in")
         response.set_cookie(COOKIE, sessions.create(user["username"]), httponly=True, samesite="strict",
-                            secure=settings.secure_cookies, max_age=settings.session_hours * 3600)
+                            secure=settings.secure_cookies or request.url.scheme == "https",
+                            max_age=settings.session_hours * 3600)
         return {"ok": True, **user}
 
     @app.post("/api/logout")
@@ -1645,6 +1646,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return c.inventory(host)
 
     # --- UI ----------------------------------------------------------------
+
+    @app.get("/api/openapi.json", include_in_schema=False, dependencies=admin_only)
+    def openapi_json():
+        return app.openapi()
+
+    @app.get("/api/docs", include_in_schema=False, dependencies=admin_only)
+    def api_docs():
+        from fastapi.openapi.docs import get_swagger_ui_html
+        return get_swagger_ui_html(openapi_url="/api/openapi.json", title="KasTec API")
+
+    # Security headers on every answer. The page may only run KasTec's own scripts and talk to KasTec; it can't
+    # be shown inside another site's frame; API answers aren't kept in the browser's cache.
+    CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+           "font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; "
+           "frame-ancestors 'none'")
+    DOCS_CSP = CSP.replace("script-src 'self'", "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net") \
+                  .replace("style-src 'self'", "style-src 'self' https://cdn.jsdelivr.net") \
+                  .replace("img-src 'self'", "img-src 'self' https://fastapi.tiangolo.com")
+    UNSAFE = {"POST", "PUT", "PATCH", "DELETE"}
+
+    @app.middleware("http")
+    async def security(request: Request, call_next):
+        # A change can only come from KasTec's own page (or a script with no browser Origin, like the activity
+        # agent). Stops another website, including one on this same server, from acting as the signed-in user.
+        origin = request.headers.get("origin")
+        if request.method in UNSAFE and request.url.path.startswith("/api/") and origin is not None:
+            from urllib.parse import urlsplit
+            if origin == "null" or urlsplit(origin).netloc.lower() != (request.headers.get("host") or "").lower():
+                log.warning("Blocked a cross-site %s %s from %s", request.method, request.url.path, origin)
+                return JSONResponse(status_code=403, content={"detail": "Blocked: this request came from another website."})
+        response = await call_next(request)
+        h = response.headers
+        h["Content-Security-Policy"] = DOCS_CSP if request.url.path == "/api/docs" else CSP
+        h["X-Frame-Options"] = "DENY"
+        h["X-Content-Type-Options"] = "nosniff"
+        h["Referrer-Policy"] = "no-referrer"
+        h["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+        h["Cross-Origin-Opener-Policy"] = "same-origin"
+        if request.url.scheme == "https":
+            h["Strict-Transport-Security"] = "max-age=31536000"
+        if request.url.path.startswith("/api/") and "cache-control" not in h:
+            h["Cache-Control"] = "no-store"
+        return response
 
     @app.middleware("http")
     async def revalidate_ui(request: Request, call_next):

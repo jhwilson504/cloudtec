@@ -204,7 +204,7 @@ function noConnections(kind) {
   const article = kind === "idrac" ? "an" : "a";
   if (!isAdmin()) return `<div class="card empty"><p>No ${label} connected yet. Ask a KasTec administrator to add one.</p></div>`;
   return `<div class="card empty"><p>No ${label} connected yet.</p>
-    <a class="btn primary" href="#/connections" onclick="state.connKind='${kind}'">Add ${article} ${label}</a></div>`;
+    <a class="btn primary" href="#/connections" data-conn-kind="${esc(kind)}">Add ${article} ${label}</a></div>`;
 }
 
 function debounce(fn, ms = 300) {
@@ -390,6 +390,9 @@ setInterval(() => { if (state.me && !document.hidden) drawStatusBar(); }, 30000)
     toast(`Copied ${text.length > 60 ? text.slice(0, 57) + "…" : text}`);
   });
 })();
+
+// "Add a … connection" links preselect that kind on the Connections page.
+document.addEventListener("click", (e) => { const a = e.target.closest?.("[data-conn-kind]"); if (a) state.connKind = a.dataset.connKind; });
 
 // Command palette (Ctrl+K): jump to any page, run an action, or search everything.
 const palette = { items: [], sel: 0 };

@@ -87,7 +87,7 @@ def fingerprint(kind: str, etype: str, frames: list[str], message: str) -> str:
     # Line numbers move with every edit; the same bug should keep the same fingerprint.
     where = [re.sub(r":\d+ in", " in", f) for f in frames[-3:]]
     what = re.sub(r"\d+", "#", message)[:120]
-    return hashlib.sha1(json.dumps([kind, etype, where, what]).encode()).hexdigest()[:12]
+    return hashlib.sha1(json.dumps([kind, etype, where, what]).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 class ErrorWatch:

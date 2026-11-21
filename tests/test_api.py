@@ -205,7 +205,31 @@ def test_password_file_blanked_while_running_never_allows_empty_login(tmp_path):
 def test_ui_is_revalidated_so_updates_show(client):
     assert client.get("/").headers["cache-control"] == "no-cache"
     assert client.get("/static/app.js").headers["cache-control"] == "no-cache"
-    assert "cache-control" not in client.get("/api/connections").headers
+    assert client.get("/api/connections").headers["cache-control"] == "no-store"   # API answers aren't cached
+
+
+def test_security_headers(client):
+    h = client.get("/").headers
+    assert "script-src 'self';" in h["content-security-policy"] and "frame-ancestors 'none'" in h["content-security-policy"]
+    assert h["x-frame-options"] == "DENY" and h["x-content-type-options"] == "nosniff" and h["referrer-policy"] == "no-referrer"
+    assert "strict-transport-security" not in h                      # only over HTTPS
+    assert "<script>" not in client.get("/").text                    # no inline script, so the policy can be strict
+
+
+def test_cross_site_changes_are_blocked(client):
+    r = client.post("/api/connections", json={"kind": "ad", "name": "x", "demo": True}, headers={"Origin": "http://evil.example"})
+    assert r.status_code == 403 and "another website" in r.json()["detail"]
+    assert client.post("/api/logout", headers={"Origin": "null"}).status_code == 403
+    ok = client.post("/api/connections", json={"kind": "ad", "name": "x", "demo": True}, headers={"Origin": "http://testserver"})
+    assert ok.status_code == 201                                     # KasTec's own page
+    assert client.get("/api/connections", headers={"Origin": "http://evil.example"}).status_code == 200   # reading is fine
+
+
+def test_api_docs_are_for_admins_only(client, tmp_path):
+    assert client.get("/api/openapi.json").status_code == 200        # the admin is signed in
+    from fastapi.testclient import TestClient as TC
+    anon = TC(client.app)
+    assert anon.get("/api/docs").status_code == 401 and anon.get("/api/openapi.json").status_code == 401
 
 
 def test_reset_password_can_unlock(client):
